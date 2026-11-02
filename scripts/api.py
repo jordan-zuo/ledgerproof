@@ -6,12 +6,12 @@ never waits for the model to finish before showing progress.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import sqlite3
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -27,10 +27,29 @@ sys.path.insert(0, str(ROOT))
 
 from agent import store  # noqa: E402
 from agent.access import access_state, require_write  # noqa: E402
+from agent.accounting import (  # noqa: E402
+    GENERIC_COLUMNS,
+    XERO_COLUMNS,
+    XeroMapping,
+    close_snapshot,
+    ledger_rows,
+    missing_xero_fields,
+    periods_summary,
+    periods_view,
+    valid_period,
+    xero_rows,
+)
 from agent.approvals import ApprovalQueue  # noqa: E402
 from agent.bill_identity import identify_bill  # noqa: E402
 from agent.bill_math import verify_ledger_math  # noqa: E402
+from agent.dispatch import DurableCancel, RunDispatcher  # noqa: E402
 from agent.guardrails import assess_due_amount, assess_grounding  # noqa: E402
+from agent.ingest import (  # noqa: E402
+    InboxWatcher,
+    document_catalog,
+    ingest_once,
+    watcher_enabled,
+)
 from agent.periods import period_compatible  # noqa: E402
 from agent.reconciliation import reconcile, summarize  # noqa: E402
 from agent.runner import run_with_model  # noqa: E402
@@ -39,11 +58,30 @@ from agent.tools import LedgerArgs, LedgerWriteTool, RetrievalTool  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> Any:
-    """Read .env once when a real server starts, not when tests import the app."""
+    """Read .env once when a real server starts, not when tests import the app.
+
+    The dispatcher owns the run queue for the life of the process. Every
+    process pointed at the same database competes for the same claims.
+    """
     from dotenv import load_dotenv
 
     load_dotenv()
-    yield
+    store.init_db()
+    for absent in store.fail_unclaimed_runs():
+        store.append_event(
+            absent,
+            "error",
+            "failed: no worker owns this run after a restart",
+            {"reason": "restart without a claim"},
+        )
+    WORKER.start()
+    if watcher_enabled():
+        WATCHER.start()
+    try:
+        yield
+    finally:
+        WATCHER.stop()
+        WORKER.stop()
 
 
 app = FastAPI(title="enterprise-agent-orchestrator", lifespan=lifespan)
@@ -72,6 +110,11 @@ class ReverseRequest(BaseModel):
     approved_by: str = Field(min_length=1, max_length=120)
 
 
+class CloseRequest(BaseModel):
+    note: str = Field(min_length=3, max_length=500)
+    decided_by: str = Field(default="web-ui", min_length=1, max_length=120)
+
+
 def _client() -> Any:
     if TEST_CLIENT is not None:
         return TEST_CLIENT
@@ -92,11 +135,9 @@ def _docs() -> dict[str, str]:
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 
-# Runs are model-bound and slow; the request that started one must not wait.
-_RUNS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="run")
-
-# Process-local stop signals. A run only has an entry while its worker lives.
-_CANCELS: dict[str, threading.Event] = {}
+# Same-process stop handles for a fast cancel. The durable signal lives in the
+# runs table, so a cancel still reaches a worker in another process.
+_CANCELS: dict[str, Any] = {}
 
 
 def _persist_side_effect(
@@ -161,66 +202,89 @@ def _deny_pending_tickets(run_id: str) -> list[str]:
     return denied
 
 
-def _execute_run(
-    run_id: str, task: str, max_steps: int, cancel: threading.Event
-) -> None:
+def _execute_run(run_id: str, task: str, max_steps: int, cancel: Any) -> None:
     """Worker body. Every step lands in the store the moment it happens."""
-    retrieval = RetrievalTool(_docs())
-    ledger = LedgerWriteTool(
-        posted=lambda args: store.find_ledger_posting(
-            args.source_doc,
-            args.amount,
-            args.currency,
-            bill_key=args.bill_key or "",
+    _CANCELS[run_id] = cancel
+    try:
+        retrieval = RetrievalTool(_docs())
+        ledger = LedgerWriteTool(
+            posted=lambda args: store.find_ledger_posting(
+                args.source_doc,
+                args.amount,
+                args.currency,
+                bill_key=args.bill_key or "",
+            )
         )
-    )
-    queue = ApprovalQueue()
-    state = AgentState(task=task, max_steps=max_steps)
+        queue = ApprovalQueue()
+        state = AgentState(task=task, max_steps=max_steps)
 
-    def _status() -> str:
-        # Cancellation wins over whatever the step just set, so a slow step
-        # finishing after the click can never resurrect "running".
-        return "cancelled" if cancel.is_set() else state.status
+        def _status() -> str:
+            # Cancellation wins over whatever the step just set, so a slow step
+            # finishing after the click can never resurrect "running".
+            return "cancelled" if cancel.is_set() else state.status
 
-    def sink(kind: str, body: str, data: dict[str, Any]) -> None:
+        def sink(kind: str, body: str, data: dict[str, Any]) -> None:
+            try:
+                _persist_side_effect(run_id, kind, data, queue)
+                store.append_event(run_id, kind, body, data)
+                store.set_run_status(run_id, _status(), state.step_count)
+            except store.DuplicateLedgerEntry as exc:
+                # A duplicate entry is a containment failure, not a silent skip.
+                store.append_event(run_id, "error", str(exc), {"reason": str(exc)})
+                if not cancel.is_set():
+                    state.status = "failed"
+                    state.failure_reason = str(exc)
+                store.set_run_status(run_id, _status(), state.step_count)
+                raise
+
+        state.stream_to(sink)
         try:
-            _persist_side_effect(run_id, kind, data, queue)
-            store.append_event(run_id, kind, body, data)
-            store.set_run_status(run_id, _status(), state.step_count)
-        except store.DuplicateLedgerEntry as exc:
-            # A duplicate entry is a containment failure, not a silent skip.
-            store.append_event(run_id, "error", str(exc), {"reason": str(exc)})
+            state = run_with_model(
+                state,
+                _client(),
+                _model(),
+                retrieval,
+                ledger,
+                queue,
+                cancel=cancel,
+            )
+        except Exception as exc:
+            # A loud failure must still leave an explainable run record.
+            message = f"{type(exc).__name__}: {exc}"
+            store.append_event(run_id, "error", message, {"reason": message})
             if not cancel.is_set():
                 state.status = "failed"
-                state.failure_reason = str(exc)
+                state.failure_reason = message
             store.set_run_status(run_id, _status(), state.step_count)
-            raise
-
-    state.stream_to(sink)
-    try:
-        state = run_with_model(
-            state,
-            _client(),
-            _model(),
-            retrieval,
-            ledger,
-            queue,
-            cancel=cancel,
-        )
-    except Exception as exc:
-        # A loud failure must still leave an explainable run record.
-        message = f"{type(exc).__name__}: {exc}"
-        store.append_event(run_id, "error", message, {"reason": message})
-        if not cancel.is_set():
-            state.status = "failed"
-            state.failure_reason = message
+            return
         store.set_run_status(run_id, _status(), state.step_count)
-        return
     finally:
         if cancel.is_set():
             _deny_pending_tickets(run_id)
         _CANCELS.pop(run_id, None)
-    store.set_run_status(run_id, _status(), state.step_count)
+
+
+def _claimed_run(run: dict[str, Any]) -> None:
+    """Adapter from a claimed row to the worker body."""
+    run_id = str(run["run_id"])
+    attempts = int(run.get("attempts", 1))
+    if attempts > 1:
+        store.append_event(
+            run_id,
+            "status",
+            f"status: resumed after worker loss (attempt {attempts})",
+            {"status": "running", "attempt": attempts, "reason": "worker lost"},
+        )
+    _execute_run(
+        run_id,
+        str(run["task"]),
+        int(run["max_steps"]),
+        DurableCancel(run_id),
+    )
+
+
+WORKER = RunDispatcher(_claimed_run)
+WATCHER = InboxWatcher()
 
 
 @app.get("/health")
@@ -230,8 +294,19 @@ def health() -> dict[str, bool]:
 
 @app.get("/config")
 def config() -> dict[str, object]:
-    """Tell the UI whether writes are open, token-gated, or read-only."""
-    return access_state()
+    """Tell the UI whether writes are open, token-gated, or read-only.
+
+    The Xero block only carries mapping defaults. The token itself is never
+    part of this response.
+    """
+    state: dict[str, object] = dict(access_state())
+    state["xero"] = {
+        "contact": os.environ.get("XERO_CONTACT", ""),
+        "account_code": os.environ.get("XERO_ACCOUNT_CODE", ""),
+        "tax_type": os.environ.get("XERO_TAX_TYPE", ""),
+        "due_days": os.environ.get("XERO_DUE_DAYS", "0"),
+    }
+    return state
 
 
 @app.get("/")
@@ -247,6 +322,11 @@ def index(request: Request) -> Any:
         "ledger": "/ledger",
         "approvals": "/approvals",
         "corpus": "/corpus",
+        "documents": "/documents",
+        "ingest": "/ingest",
+        "periods": "/periods",
+        "export_ledger": "/export/ledger.csv",
+        "export_xero": "/export/xero.csv",
     }
 
 
@@ -261,6 +341,24 @@ def ui() -> Any:
 @app.get("/corpus")
 def corpus() -> dict[str, str]:
     return _docs()
+
+
+@app.get("/documents")
+def documents() -> dict[str, Any]:
+    """The catalog an operator checks before a run: identity and duplicates."""
+    store.init_db()
+    return document_catalog(_docs(), store.list_documents())
+
+
+@app.post("/ingest", dependencies=[Depends(require_write)])
+def ingest() -> dict[str, Any]:
+    """Scan the inbox now. The watcher does the same on file changes."""
+    try:
+        return ingest_once()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"ingest failed: {type(exc).__name__}: {exc}"
+        ) from None
 
 
 @app.get("/favicon.ico")
@@ -306,6 +404,149 @@ def reconciliation() -> dict[str, Any]:
     return {"bills": bills, "summary": summarize(bills)}
 
 
+def _documents() -> dict[str, dict]:
+    return {doc["doc_id"]: doc for doc in store.list_documents()}
+
+
+def _period_rows() -> list[dict]:
+    return periods_view(
+        store.list_ledger(), store.list_period_closures(), _documents()
+    )
+
+
+def _checked_period(period: str) -> str:
+    try:
+        return valid_period(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.get("/periods")
+def periods() -> dict[str, Any]:
+    """Accounting months, their outstanding totals, and their close state."""
+    store.init_db()
+    months = _period_rows()
+    return {"periods": months, "summary": periods_summary(months)}
+
+
+@app.post("/periods/{period}/close", dependencies=[Depends(require_write)])
+def close_month(period: str, req: CloseRequest) -> dict[str, Any]:
+    """Freeze a month. Postings and reversals for its bills are refused."""
+    store.init_db()
+    _checked_period(period)
+    snapshot = close_snapshot(period, store.list_ledger(), _documents())
+    try:
+        closure = store.close_period(
+            period, req.note, req.decided_by, snapshot
+        )
+    except store.PeriodAlreadyClosed:
+        raise HTTPException(
+            status_code=409, detail=f"period {period} is already closed"
+        ) from None
+    return {"period": period, "status": "closed", "closure": closure}
+
+
+@app.post("/periods/{period}/reopen", dependencies=[Depends(require_write)])
+def reopen_month(period: str, req: CloseRequest) -> dict[str, Any]:
+    """Reopen a month for a correction. The close action stays in history."""
+    store.init_db()
+    _checked_period(period)
+    try:
+        action = store.reopen_period(period, req.note, req.decided_by)
+    except store.PeriodNotClosed:
+        raise HTTPException(
+            status_code=409, detail=f"period {period} is not closed"
+        ) from None
+    return {"period": period, "status": "open", "closure": action}
+
+
+def _csv_response(columns: tuple[str, ...], rows: list[dict], name: str) -> Response:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=list(columns), extrasaction="ignore", lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/export/ledger.csv")
+def export_ledger_csv(
+    period: str | None = Query(default=None),
+    scope: str = Query(default="all", pattern="^(all|outstanding)$"),
+) -> Response:
+    """Every row with its audit fields, or one accounting month."""
+    store.init_db()
+    if period:
+        _checked_period(period)
+    rows = ledger_rows(
+        store.list_ledger(),
+        store.list_period_closures(),
+        _documents(),
+        period=period,
+        scope=scope,
+    )
+    return _csv_response(
+        GENERIC_COLUMNS, rows, f"ledger-{period or 'all'}.csv"
+    )
+
+
+@app.get("/export/xero.csv")
+def export_xero_csv(
+    period: str | None = Query(default=None),
+    contact: str | None = Query(default=None),
+    account_code: str | None = Query(default=None),
+    tax_type: str | None = Query(default=None),
+    due_days: int | None = Query(default=None, ge=0, le=365),
+) -> Response:
+    """Xero bill import shape from outstanding bills.
+
+    Contact, account code, and tax type are required: the ledger stores
+    evidence and amounts, not the chart of accounts. They come from the
+    request first, then from XERO_* defaults.
+    """
+    store.init_db()
+    if period:
+        _checked_period(period)
+    mapping = XeroMapping(
+        contact=(contact or os.environ.get("XERO_CONTACT", "")).strip(),
+        account_code=(
+            account_code or os.environ.get("XERO_ACCOUNT_CODE", "")
+        ).strip(),
+        tax_type=(tax_type or os.environ.get("XERO_TAX_TYPE", "")).strip(),
+        due_days=(
+            due_days
+            if due_days is not None
+            else int(os.environ.get("XERO_DUE_DAYS", "0") or 0)
+        ),
+    )
+    missing = missing_xero_fields(mapping)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Xero export needs "
+                + ", ".join(missing)
+                + ". The ledger does not invent a supplier, account code, or"
+                " tax type. Pass them in the query or set XERO_CONTACT,"
+                " XERO_ACCOUNT_CODE, and XERO_TAX_TYPE."
+            ),
+        )
+    rows = xero_rows(
+        store.list_ledger(), _documents(), mapping, period=period
+    )
+    return _csv_response(
+        XERO_COLUMNS, rows, f"xero-bills-{period or 'all'}.csv"
+    )
+
+
 @app.post("/ledger/{ledger_id}/reverse", dependencies=[Depends(require_write)])
 def reverse_entry(ledger_id: int, req: ReverseRequest) -> dict[str, Any]:
     """Append a signed correction. The human action is the approval.
@@ -327,6 +568,13 @@ def reverse_entry(ledger_id: int, req: ReverseRequest) -> dict[str, Any]:
     except store.NotReversible:
         raise HTTPException(
             status_code=409, detail="a reversal entry cannot be reversed"
+        ) from None
+    except store.PeriodClosed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"period {exc.period} is closed; reopen it before reversing"
+            ),
         ) from None
     store.append_event(
         entry["run_id"],
@@ -397,9 +645,15 @@ def create_run(req: RunRequest) -> dict[str, Any]:
     if req.request_id:
         existing = store.find_run_by_request(req.request_id)
         if existing is not None:
+            WORKER.wake()
             return _run_receipt(existing, True)
     try:
-        run_id = store.create_run(req.task, request_id=req.request_id)
+        run_id = store.create_run(
+            req.task,
+            request_id=req.request_id,
+            max_steps=req.max_steps,
+            status="pending",
+        )
     except sqlite3.IntegrityError:
         # Lost a race with a concurrent submit carrying the same request id.
         existing = (
@@ -408,13 +662,7 @@ def create_run(req: RunRequest) -> dict[str, Any]:
         if existing is None:
             raise
         return _run_receipt(existing, True)
-    cancel = threading.Event()
-    _CANCELS[run_id] = cancel
-    try:
-        _RUNS.submit(_execute_run, run_id, req.task, req.max_steps, cancel)
-    except Exception:
-        _CANCELS.pop(run_id, None)
-        raise
+    WORKER.wake()
     return _run_receipt({"run_id": run_id, "status": "running"}, False)
 
 
@@ -656,6 +904,16 @@ def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
         )
     args.bill_key = identity.key
 
+    closed = store.closed_period_for(args.bill_key, args.source_doc)
+    if closed:
+        # Refuse before deciding, so the ticket survives for after a reopen.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"period {closed} is closed; reopen it before posting"
+            ),
+        )
+
     ticket = _gate(ticket_id, True, req.decided_by, req.note)
     receipt = f"ledger_write: {args.source_doc} {args.amount:.2f} {args.currency}"
     try:
@@ -675,6 +933,13 @@ def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
                 " existing ledger row"
             ),
         )
+    except store.PeriodClosed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"period {exc.period} is closed; reopen it before posting"
+            ),
+        ) from None
     store.append_event(
         run_id,
         "approval",

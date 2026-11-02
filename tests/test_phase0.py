@@ -197,6 +197,8 @@ def test_clear_ledger_archives_first_and_restores_triggers(isolated_db) -> None:
         "events": 0,
         "ledger": 0,
         "approvals": 0,
+        "documents": 0,
+        "period_closures": 0,
     }
 
     # A cleared ledger is still append-only, and accepts new postings as if
@@ -282,18 +284,18 @@ def test_reposting_a_bill_never_reaches_a_human(isolated_db, monkeypatch) -> Non
             ]
         ),
     )
-    client = TestClient(api.app)
-    started = client.post("/run", json={"task": "recon", "max_steps": 6})
-    run_id = started.json()["run_id"]
-    settled = wait_for_run(client, run_id)
+    with TestClient(api.app) as client:
+        started = client.post("/run", json={"task": "recon", "max_steps": 6})
+        run_id = started.json()["run_id"]
+        settled = wait_for_run(client, run_id)
 
-    # Nothing new posted, nothing queued for a human to rubber-stamp.
-    assert len(store.list_ledger()) == 1
-    assert client.get("/approvals").json()["pending"] == []
-    rejected = [e for e in settled["events"] if e["kind"] == "rejected"]
-    assert rejected, settled["events"]
-    assert "already posted" in rejected[0]["data"]["reason"]
-    assert settled["run"]["status"] == "done"
+        # Nothing new posted, nothing queued for a human to rubber-stamp.
+        assert len(store.list_ledger()) == 1
+        assert client.get("/approvals").json()["pending"] == []
+        rejected = [e for e in settled["events"] if e["kind"] == "rejected"]
+        assert rejected, settled["events"]
+        assert "already posted" in rejected[0]["data"]["reason"]
+        assert settled["run"]["status"] == "done"
 
 
 def _seed_ticket(
@@ -399,37 +401,37 @@ def test_request_approval_ticket_can_be_approved_via_api(
             [{"action": "request_approval", "args": {}, "reason": "need a human"}]
         ),
     )
-    client = TestClient(api.app)
-    started = client.post("/run", json={"task": "t", "max_steps": 3})
-    assert started.status_code == 202, started.text
-    run = wait_for_run(client, started.json()["run_id"])
-    assert run["run"]["status"] == "awaiting_approval"
+    with TestClient(api.app) as client:
+        started = client.post("/run", json={"task": "t", "max_steps": 3})
+        assert started.status_code == 202, started.text
+        run = wait_for_run(client, started.json()["run_id"])
+        assert run["run"]["status"] == "awaiting_approval"
 
-    pending = client.get("/approvals").json()["pending"]
-    assert len(pending) == 1
-    ticket_id = pending[0]["ticket_id"]
+        pending = client.get("/approvals").json()["pending"]
+        assert len(pending) == 1
+        ticket_id = pending[0]["ticket_id"]
 
-    res = client.post(
-        f"/approvals/{ticket_id}/decide",
-        json={"approved": True, "decided_by": "alice"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["status"] == "done"
-    assert store.get_run(started.json()["run_id"])["status"] == "done"
-    assert store.list_ledger() == []
+        res = client.post(
+            f"/approvals/{ticket_id}/decide",
+            json={"approved": True, "decided_by": "alice"},
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "done"
+        assert store.get_run(started.json()["run_id"])["status"] == "done"
+        assert store.list_ledger() == []
 
 
 def test_failed_run_is_recorded_not_left_running(isolated_db, monkeypatch) -> None:
     monkeypatch.setattr(api, "TEST_CLIENT", _ExplodingClient())
-    client = TestClient(api.app, raise_server_exceptions=False)
 
-    res = client.post("/run", json={"task": "explode", "max_steps": 3})
+    with TestClient(api.app, raise_server_exceptions=False) as client:
+        res = client.post("/run", json={"task": "explode", "max_steps": 3})
 
-    # Starting a run cannot fail on the model: the work happens after the
-    # response, and the failure is recorded on the run instead of the caller.
-    assert res.status_code == 202
-    run_id = res.json()["run_id"]
-    settled = wait_for_run(client, run_id)
-    assert settled["run"]["status"] == "failed"
-    events = store.get_events(run_id)
-    assert any(e["kind"] == "error" for e in events)
+        # Starting a run cannot fail on the model: the work happens after the
+        # response, and the failure is recorded on the run instead of the caller.
+        assert res.status_code == 202
+        run_id = res.json()["run_id"]
+        settled = wait_for_run(client, run_id)
+        assert settled["run"]["status"] == "failed"
+        events = store.get_events(run_id)
+        assert any(e["kind"] == "error" for e in events)

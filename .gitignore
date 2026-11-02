@@ -6,6 +6,8 @@ __pycache__/
 .env
 data/app.db
 data/*.db
+data/*.lock
+data/.*.tmp
 .tmp/
 data/archive/
 HANDOFF.md

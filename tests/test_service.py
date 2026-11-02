@@ -85,31 +85,31 @@ def test_run_persists_quoted_write_and_replays(
     isolated_db, demo_corpus, monkeypatch
 ) -> None:
     monkeypatch.setattr(api, "TEST_CLIENT", _ScriptedClient(_quoted_flow()))
-    client = TestClient(api.app)
-    started = client.post("/run", json={"task": "recon", "max_steps": 6})
-    assert started.status_code == 202, started.text
-    run_id = started.json()["run_id"]
-    assert started.json()["status"] == "running"
+    with TestClient(api.app) as client:
+        started = client.post("/run", json={"task": "recon", "max_steps": 6})
+        assert started.status_code == 202, started.text
+        run_id = started.json()["run_id"]
+        assert started.json()["status"] == "running"
 
-    settled = wait_for_run(client, run_id)
-    assert settled["run"]["status"] == "done"
+        settled = wait_for_run(client, run_id)
+        assert settled["run"]["status"] == "done"
 
-    replay = client.get(f"/runs/{run_id}")
-    assert replay.status_code == 200
-    events = replay.json()["events"]
-    assert any("4049.18" in e["body"] for e in events)
-    assert any(e["kind"] == "decision" for e in events)
-    assert all(isinstance(e["data"], dict) for e in events)
-    assert any(e["kind"] == "retrieve" and e["data"].get("doc_ids") for e in events)
+        replay = client.get(f"/runs/{run_id}")
+        assert replay.status_code == 200
+        events = replay.json()["events"]
+        assert any("4049.18" in e["body"] for e in events)
+        assert any(e["kind"] == "decision" for e in events)
+        assert all(isinstance(e["data"], dict) for e in events)
+        assert any(e["kind"] == "retrieve" and e["data"].get("doc_ids") for e in events)
 
-    stream = client.get(f"/runs/{run_id}/stream")
-    assert stream.status_code == 200
-    assert "text/event-stream" in stream.headers["content-type"]
-    assert "4049.18" in stream.text
-    assert "id: 0" in stream.text
+        stream = client.get(f"/runs/{run_id}/stream")
+        assert stream.status_code == 200
+        assert "text/event-stream" in stream.headers["content-type"]
+        assert "4049.18" in stream.text
+        assert "id: 0" in stream.text
 
-    ledger = client.get("/ledger").json()["entries"]
-    assert any(e["entry_id"] == "lease-7-q3" for e in ledger)
+        ledger = client.get("/ledger").json()["entries"]
+        assert any(e["entry_id"] == "lease-7-q3" for e in ledger)
 
 
 def test_decide_unknown_ticket_404(isolated_db) -> None:

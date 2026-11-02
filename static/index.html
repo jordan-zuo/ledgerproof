@@ -484,9 +484,14 @@
       letter-spacing: 0.5px;
     }
 
-    .status-badge.running {
+    .status-badge.running,
+    .status-badge.pending {
       background: #E8F0FE;
       color: #1A73E8;
+    }
+
+    .status-badge.pending {
+      animation: pulse 2s infinite;
     }
 
     .status-badge.awaiting_approval {
@@ -533,6 +538,16 @@
 
     .status-badge.conflict {
       animation: pulse 2s infinite;
+    }
+
+    .status-badge.open {
+      background: var(--accent-sage-bg);
+      color: var(--accent-sage);
+    }
+
+    .status-badge.closed {
+      background: #EFECE7;
+      color: var(--text-muted);
     }
 
     body.read-only .write-control,
@@ -932,6 +947,34 @@
       line-height: 1.5;
     }
 
+    .doc-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+
+    .dup-badge {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: #F6E6D4;
+      color: var(--accent-rust);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .dup-warning {
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      background: #FBF3E6;
+      border: 1px solid #E4C9A8;
+      color: var(--accent-rust);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
     /* Responsive */
     .toast-stack {
       position: fixed;
@@ -1063,6 +1106,7 @@
         <li><a href="#orchestrator" class="active">Run Task</a></li>
         <li><a href="#timeline">Run Timeline</a></li>
         <li><a href="#reconciliation">Reconciliation</a></li>
+        <li><a href="#period-close">Period Close</a></li>
         <li><a href="#ledger">Financial Ledger</a></li>
         <li><a href="javascript:void(0)" onclick="openCorpusModal()">Document Catalog</a></li>
       </ul>
@@ -1316,6 +1360,67 @@
       </table>
     </div>
 
+    <!-- Period Close & Export -->
+    <div class="section-head" id="period-close">
+      <div>
+        <h2 class="section-title">Period Close &amp; Export</h2>
+        <div style="font-size: 13.5px; color: var(--text-muted);">A bill belongs to the month its billing period ends. Closing a month refuses new postings and reversals for those bills until it is reopened.</div>
+      </div>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <span id="period-summary" style="font-size: 12.5px; color: var(--text-muted);"></span>
+        <button class="pill-btn light" onclick="refreshPeriods()">
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    <div class="ledger-container" style="margin-bottom: 16px;">
+      <table class="ledger-table">
+        <thead>
+          <tr>
+            <th>Period</th>
+            <th>Status</th>
+            <th>Bills</th>
+            <th>Outstanding</th>
+            <th>Review</th>
+            <th>Close / Reopen</th>
+            <th>Export</th>
+          </tr>
+        </thead>
+        <tbody id="periods-body">
+          <tr>
+            <td colspan="7" style="text-align: center; padding: 32px; color: var(--text-muted);">
+              Loading accounting periods...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="ledger-container" style="padding: 16px; margin-bottom: 20px;">
+      <div class="card-label" style="margin-bottom: 10px;">Xero bill export mapping</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+        <label style="font-size: 12px; color: var(--text-muted);">Supplier contact<br>
+          <input id="xero-contact" type="text" placeholder="e.g. AGL" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 170px;">
+        </label>
+        <label style="font-size: 12px; color: var(--text-muted);">Account code<br>
+          <input id="xero-account-code" type="text" placeholder="e.g. 400" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 100px;">
+        </label>
+        <label style="font-size: 12px; color: var(--text-muted);">Tax type<br>
+          <input id="xero-tax-type" type="text" placeholder="e.g. INPUT" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 110px;">
+        </label>
+        <label style="font-size: 12px; color: var(--text-muted);">Due days<br>
+          <input id="xero-due-days" type="number" min="0" max="365" placeholder="0" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 80px;">
+        </label>
+        <button class="pill-btn light" onclick="downloadXeroCsv()">
+          Download all outstanding
+        </button>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-top: 10px;">
+        Xero needs the supplier, account code, and tax type because the ledger stores evidence and amounts, not your chart of accounts. Invoice date is the bill issue date, then period end, then posting date. Due date defaults to the invoice date.
+      </div>
+    </div>
+
     <!-- Financial Ledger Table -->
     <div class="section-head" id="ledger">
       <div>
@@ -1359,9 +1464,14 @@
     <div class="modal-window">
       <div class="modal-header">
         <h3 class="modal-title">Document Catalog</h3>
-        <button class="pill-btn light" style="padding: 6px 12px; font-size: 12px;" onclick="closeCorpusModal()">
-          Close
-        </button>
+        <div style="display: flex; gap: 8px;">
+          <button id="ingest-btn" class="pill-btn camel" style="padding: 6px 14px; font-size: 12px; display: none;" onclick="runIngest()">
+            Ingest inbox
+          </button>
+          <button class="pill-btn light" style="padding: 6px 12px; font-size: 12px;" onclick="closeCorpusModal()">
+            Close
+          </button>
+        </div>
       </div>
       <div class="modal-body" id="corpus-modal-body">
         Loading document collections...
@@ -1477,7 +1587,24 @@
       } catch (e) {
         access = { mode: 'open', read_only: false, auth_required: false };
       }
+      applyXeroDefaults();
       applyAccess();
+    }
+
+    function applyXeroDefaults() {
+      const defaults = access.xero || {};
+      const fields = [
+        ['xero-contact', 'contact'],
+        ['xero-account-code', 'account_code'],
+        ['xero-tax-type', 'tax_type'],
+        ['xero-due-days', 'due_days'],
+      ];
+      fields.forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (el && !el.value && defaults[key] !== undefined && defaults[key] !== null) {
+          el.value = defaults[key];
+        }
+      });
     }
 
     function ownerLogin() {
@@ -2084,8 +2211,178 @@
       }
     }
 
+    function formatMoney(totals) {
+      const entries = Object.entries(totals || {});
+      if (!entries.length) return '0.00';
+      return entries
+        .map(([currency, amount]) => `${Number(amount).toFixed(2)} ${escapeHtml(currency)}`)
+        .join(' + ');
+    }
+
+    async function refreshPeriods() {
+      const tbody = document.getElementById('periods-body');
+      if (!tbody) return;
+      try {
+        const res = await fetch('/periods');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const periods = data.periods || [];
+        const summary = data.summary || {};
+        const summaryEl = document.getElementById('period-summary');
+        if (summaryEl) {
+          summaryEl.innerText = `${summary.open || 0} open, ${summary.closed || 0} closed${summary.exceptions ? `, ${summary.exceptions} to review` : ''}`;
+        }
+        if (!periods.length) {
+          tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 24px; color: var(--text-muted);">No accounting periods yet. Post a bill to open one.</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = '';
+        periods.forEach(period => {
+          const reviewCount = (period.exceptions || []).length;
+          const review = reviewCount
+            ? `<span class="status-badge conflict" style="font-size: 10px; padding: 3px 8px;">${reviewCount} to review</span>`
+            : `<span style="color: var(--text-muted);">clear</span>`;
+          const frozen = period.status === 'closed' && period.snapshot
+            ? ` &middot; frozen ${Number(period.snapshot.bills || 0)} bills, ${formatMoney(period.snapshot.outstanding)}`
+            : '';
+          const closedNote = period.status === 'closed'
+            ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(period.closed_by)}: ${escapeHtml(period.note)}${frozen}</div>`
+            : '';
+          let action = `<span style="font-size: 11.5px; color: var(--text-muted);">read-only</span>`;
+          if (canWrite() && period.status === 'closed') {
+            action = `<button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="reopenPeriod('${escapeHtml(period.period)}')">Reopen</button>`;
+          } else if (canWrite()) {
+            action = `<button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="closePeriod('${escapeHtml(period.period)}')">Close</button>`;
+          }
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><span class="doc-pill">${escapeHtml(period.period)}</span>${closedNote}</td>
+            <td><span class="status-badge ${escapeHtml(period.status)}">${escapeHtml(period.status)}</span></td>
+            <td>${Number(period.bills || 0)}</td>
+            <td class="amount-cell">${formatMoney(period.outstanding)}</td>
+            <td>${review}</td>
+            <td>${action}</td>
+            <td>
+              <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadLedgerCsv('${escapeHtml(period.period)}')">CSV</button>
+              <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadXeroCsv('${escapeHtml(period.period)}')">Xero CSV</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--accent-rust);">Failed to load periods: ${escapeHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    async function closePeriod(period) {
+      const note = prompt(`Why is ${period} being closed?`, `Close ${period}`);
+      if (note === null) return;
+      if (note.trim().length < 3) {
+        notify('A close needs a note of at least 3 characters.', 'bad');
+        return;
+      }
+      const operator = prompt('Who is closing this period?', 'web-ui');
+      if (operator === null) return;
+      if (!operator.trim()) {
+        notify('A close needs an operator.', 'bad');
+        return;
+      }
+      try {
+        const res = await authedFetch(`/periods/${encodeURIComponent(period)}/close`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: note.trim(), decided_by: operator.trim() }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const exceptions = (data.closure && data.closure.snapshot && data.closure.snapshot.exceptions) || [];
+        notify(
+          exceptions.length
+            ? `Closed ${period} with ${exceptions.length} bill(s) still needing review.`
+            : `Closed ${period}. Postings and reversals for this month are now refused.`,
+          exceptions.length ? 'bad' : 'ok'
+        );
+        refreshLedger();
+        loadRuns();
+      } catch (e) {
+        notify('Close failed: ' + e.message, 'bad');
+      }
+    }
+
+    async function reopenPeriod(period) {
+      const note = prompt(`Why is ${period} being reopened?`, `Reopen ${period}`);
+      if (note === null) return;
+      if (note.trim().length < 3) {
+        notify('A reopen needs a note of at least 3 characters.', 'bad');
+        return;
+      }
+      const operator = prompt('Who is reopening this period?', 'web-ui');
+      if (operator === null) return;
+      if (!operator.trim()) {
+        notify('A reopen needs an operator.', 'bad');
+        return;
+      }
+      try {
+        const res = await authedFetch(`/periods/${encodeURIComponent(period)}/reopen`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: note.trim(), decided_by: operator.trim() }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        notify(`Reopened ${period}. Postings and reversals are allowed again.`, 'ok');
+        refreshLedger();
+        loadRuns();
+      } catch (e) {
+        notify('Reopen failed: ' + e.message, 'bad');
+      }
+    }
+
+    function downloadLedgerCsv(period) {
+      const url = period
+        ? `/export/ledger.csv?period=${encodeURIComponent(period)}`
+        : '/export/ledger.csv';
+      window.location.href = url;
+    }
+
+    async function downloadXeroCsv(period) {
+      const params = new URLSearchParams();
+      if (period) params.set('period', period);
+      const fields = [
+        ['xero-contact', 'contact'],
+        ['xero-account-code', 'account_code'],
+        ['xero-tax-type', 'tax_type'],
+        ['xero-due-days', 'due_days'],
+      ];
+      fields.forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (el && el.value.trim()) params.set(key, el.value.trim());
+      });
+      try {
+        const res = await fetch(`/export/xero.csv?${params.toString()}`);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `xero-bills-${period || 'all'}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        notify(`Xero export downloaded${period ? ` for ${period}` : ''}.`, 'ok');
+      } catch (e) {
+        notify('Xero export failed: ' + e.message, 'bad');
+      }
+    }
+
     async function refreshLedger() {
       refreshReconciliation();
+      refreshPeriods();
       const tbody = document.getElementById('ledger-body');
       try {
         const res = await fetch('/ledger');
@@ -2271,26 +2568,83 @@
     async function openCorpusModal() {
       const modal = document.getElementById('corpus-modal');
       const body = document.getElementById('corpus-modal-body');
+      const ingestBtn = document.getElementById('ingest-btn');
+      if (ingestBtn) ingestBtn.style.display = canWrite() ? 'inline-flex' : 'none';
       modal.classList.add('open');
       body.innerHTML = 'Loading documents...';
 
       try {
-        const res = await fetch('/corpus');
-        const docs = await res.json();
+        const res = await fetch('/documents');
+        const data = await res.json();
         body.innerHTML = '';
-        for (const [id, text] of Object.entries(docs)) {
+
+        if (data.duplicates && data.duplicates.length) {
+          const warn = document.createElement('div');
+          warn.className = 'dup-warning';
+          const groups = data.duplicates
+            .map(group => `${group.bill_key}: ${group.doc_ids.join(', ')}`)
+            .join(' | ');
+          warn.innerText = `${data.duplicates.length} bill identity appears under more than one document. ${groups}`;
+          body.appendChild(warn);
+        }
+
+        if (!data.documents || !data.documents.length) {
+          body.innerHTML = '<div style="color: var(--text-muted);">The corpus is empty. Drop a bill into the inbox and ingest it.</div>';
+          return;
+        }
+
+        for (const doc of data.documents) {
           const div = document.createElement('div');
           div.className = 'corpus-item';
+          const meta = [];
+          if (doc.source_name) meta.push(`Source: ${doc.source_name}`);
+          meta.push(`Identity: ${doc.identity_basis}`);
+          if (doc.account) meta.push(`Account ${doc.account}`);
+          if (doc.period_start) meta.push(`${doc.period_start} to ${doc.period_end}`);
+          if (doc.issue_date) meta.push(`Issued ${doc.issue_date}`);
+          const more = doc.text_chars > 400 ? ' ...' : '';
           div.innerHTML = `
             <div class="corpus-id">
-              <span class="doc-pill">${id}</span>
+              <span class="doc-pill">${escapeHtml(doc.doc_id)}</span>
+              ${doc.duplicate ? '<span class="dup-badge">Duplicate bill</span>' : ''}
             </div>
-            <div class="corpus-text">${escapeHtml(text)}</div>
+            <div class="doc-meta">${escapeHtml(meta.join(' | '))}</div>
+            <div class="corpus-text">${escapeHtml(doc.preview)}${more}</div>
           `;
           body.appendChild(div);
         }
       } catch (e) {
         body.innerHTML = `<div style="color: var(--accent-rust);">Failed to load corpus documents.</div>`;
+      }
+    }
+
+    async function runIngest() {
+      const btn = document.getElementById('ingest-btn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Ingesting...';
+      }
+      try {
+        const res = await authedFetch('/ingest', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Ingest failed');
+        const changed = data.added.length + data.updated.length;
+        const problems = data.collisions.length + data.skipped.length;
+        const collisionText = data.collisions
+          .map(c => `${c.doc_id} kept ${c.kept}, ignored ${c.ignored.join(', ')}`)
+          .join(' | ');
+        notify(
+          `Ingest complete: ${changed} changed, ${problems} need a look. ${data.total_docs} documents indexed.${collisionText ? ` Collision: ${collisionText}` : ''}`,
+          problems ? 'bad' : 'ok'
+        );
+        await openCorpusModal();
+      } catch (e) {
+        notify(`Ingest failed: ${e.message}`, 'bad');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = 'Ingest inbox';
+        }
       }
     }
 
@@ -2312,7 +2666,7 @@
     window.addEventListener('DOMContentLoaded', async () => {
       await loadAccess();
       const runs = await loadRuns();
-      const live = runs.find(r => r.status === 'running' || r.status === 'awaiting_approval');
+      const live = runs.find(r => ['pending', 'running', 'awaiting_approval'].includes(r.status));
       if (live) attachRun(live.run_id);
     });
   </script>

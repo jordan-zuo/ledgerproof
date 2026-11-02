@@ -2,7 +2,7 @@
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, an archive-first ledger reset, token-gated writes with a read-only demo mode, and a free-model pool with rotation. 150 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
+Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, and a free-model pool with rotation. 171 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
 
 ## Run
 
@@ -10,6 +10,16 @@ Status: working demo. Live run streaming, run list with reload reattach and canc
 pip install -r requirements.txt
 python -m pytest -q
 ```
+
+## Run queue
+
+`POST /run` writes a pending row and wakes a worker. Workers claim one run at a time with a conditional SQLite update, so several processes pointed at the same database cannot run the same job twice. A claim carries a 30-second lease and a 5-second heartbeat; if a process dies, the lease lapses and another worker resumes the run from step zero. The ledger's bill identity guard keeps a resumed run from posting the same bill again. A run is retried at most three times, then failed, so a crash loop cannot spend quota forever. Cancellation writes a durable flag as well as waking the local worker, so a cancel reaches whichever process holds the run.
+
+```powershell
+python -m uvicorn scripts.api:app --port 8000 --workers 2
+```
+
+The queue is SQLite, so this covers a handful of workers on one machine or a shared volume, not a distributed fleet. A worker stalled longer than its lease can be resumed while it is still alive; the ledger rejects the duplicate posting, but that run may record the resumed attempt.
 
 ## Access control
 
@@ -22,7 +32,7 @@ Writes are open by default so local development stays frictionless. Two environm
 | `READ_ONLY_DEMO=1` | Every write returns 403. Reads stay open. |
 | both set | Visitors are read-only, and the owner can still write with the token. |
 
-The UI reads `GET /config`, hides Run, Approve, Reverse, Cancel, and Clear while writes are locked, and shows the access state in the navbar. When a token is configured, Owner login stores it in this tab's sessionStorage and sends it only on write requests.
+The UI reads `GET /config`, hides Run, Approve, Reverse, Cancel, Clear, Ingest, Close, and Reopen while writes are locked, and shows the access state in the navbar. When a token is configured, Owner login stores it in this tab's sessionStorage and sends it only on write requests. Exports and views stay readable.
 
 A public portfolio deployment:
 
@@ -34,6 +44,19 @@ python -m uvicorn scripts.api:app --port 8000
 
 Anyone can browse the ledger, reconciliation, and run history; only a request carrying the token can start or change anything. Keep the token out of URLs and out of git. Binding the server to `127.0.0.1`, the default, keeps it off the network entirely. Use `--host 0.0.0.0` or a tunnel only when you mean to serve it.
 
+## Ingestion
+
+The inbox is `data/inbox` (`APP_INBOX` moves it) and the corpus is `data/corpus.json` (`APP_CORPUS` moves it). Drop in `.txt`, `.md`, or `.pdf` files and either `POST /ingest`, run `python scripts/ingest.py`, or let the watcher do it. The watcher starts with the server, polls every 5 seconds (`APP_INGEST_INTERVAL`), and ingests only when a file name, size, or modification time changed. `APP_INBOX_WATCH=0` disables it.
+
+One ingest does four things:
+
+- `doc_id` is the file stem, lowercased, with whitespace collapsed to hyphens.
+- Two files with the same `doc_id` and the same text are one source; the first file name owns it and the other is reported as a duplicate source.
+- Two files with the same `doc_id` and different text are a collision. The corpus keeps one text, the other file is named in the report, and nothing is overwritten silently. Rename the ignored file to give it its own id.
+- Canonical bill identity is computed and stored at ingest time: account plus period, then account plus issue date, then the document fallback. Two doc ids for the same bill are reported and marked in `GET /documents`, so a duplicate is visible before an agent runs.
+
+`GET /documents` is the catalog the UI uses: identity basis, account, period, source file, text size, a preview, and duplicate flags. Unsupported, empty, and no-text PDF files are reported as skipped. Corpus writes are atomic, and a lock file serializes ingest across processes, so several uvicorn workers can watch one inbox. `POST /ingest` is gated by the same write rules as every other mutation. Existing corpus documents without an inbox file stay in place, and clearing the ledger keeps document metadata.
+
 ## Ledger guarantees
 
 One bill is one identity. The key is derived from the cited text, never from the model: account number plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name cannot be posted twice.
@@ -41,6 +64,21 @@ One bill is one identity. The key is derived from the cited text, never from the
 Corrections are append-only. `POST /ledger/{id}/reverse` appends a negative row linked to the original, with a required reason and approver; the original stays in place. A reversed posting no longer blocks a corrected re-post, while a double reversal or a reversal of a reversal returns 409.
 
 The reconciliation view reads the rows back per bill. `GET /reconciliation` groups by canonical key, reports the outstanding and net amounts, flags conflicting outstanding amounts and duplicate postings, and keeps the full posting and reversal trail. The UI shows one row per bill with a trail modal, so a correction filed under a second document id still appears as one bill.
+
+## Export and period close
+
+A bill is booked to the month its billing period ends, then to its issue month, and only then to the month its ledger row was written. Server time cannot be backdated, so a posting-month close would say nothing about the bills it was meant to finalise. `GET /periods` lists those months with open or closed state, bills, outstanding and net totals per currency, and any bill still flagged conflict or duplicate.
+
+`POST /periods/{period}/close` appends a close action with the totals it froze. While a month is closed, a new posting or a reversal for a bill in that month is refused with 409; other months continue. `POST /periods/{period}/reopen` appends a reopen action so a correction can be recorded, and the close action plus its snapshot stay in the history. The UI shows the same view and applies the write rules to Close and Reopen.
+
+Two exports read the same rows:
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /export/ledger.csv?period=YYYY-MM&scope=all\|outstanding` | Every audit field: canonical bill key, accounting period and its basis, account and bill dates, amount, currency, bill status, run, entry, reversal link, reason, approver, recorded time, and whether the period is closed. |
+| `GET /export/xero.csv?period=YYYY-MM&contact=&account_code=&tax_type=&due_days=` | Xero bill import columns for outstanding bills only. A corrected bill exports its live replacement; the reversed row is absent. |
+
+Xero needs a supplier contact, account code, and tax type. The ledger stores evidence and amounts, not your chart of accounts, so the endpoint returns 400 and names the missing fields instead of inventing them. Set `XERO_CONTACT`, `XERO_ACCOUNT_CODE`, `XERO_TAX_TYPE`, and `XERO_DUE_DAYS` to make them defaults. Invoice date is the issue date, then the period end, then the posting date; due date is the invoice date plus `due_days` (default 0). Exports are reads and stay open in read-only mode.
 
 ## Live judged eval
 

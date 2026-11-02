@@ -4,8 +4,11 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent.accounting import period_for, valid_period
 
 
 class AlreadyDecided(Exception):
@@ -50,6 +53,30 @@ class NotReversible(Exception):
     def __init__(self, ledger_id: int) -> None:
         super().__init__(f"ledger entry is not a posting: {ledger_id}")
         self.ledger_id = ledger_id
+
+
+class PeriodClosed(Exception):
+    """Raised when a posting or reversal would change a closed month."""
+
+    def __init__(self, period: str) -> None:
+        super().__init__(f"accounting period is closed: {period}")
+        self.period = period
+
+
+class PeriodAlreadyClosed(Exception):
+    """Raised when a month that is already closed is closed again."""
+
+    def __init__(self, period: str) -> None:
+        super().__init__(f"accounting period is already closed: {period}")
+        self.period = period
+
+
+class PeriodNotClosed(Exception):
+    """Raised when a month that is open is offered for reopen."""
+
+    def __init__(self, period: str) -> None:
+        super().__init__(f"accounting period is not closed: {period}")
+        self.period = period
 
 
 def _now() -> str:
@@ -100,6 +127,12 @@ def init_db(path: Path | None = None) -> Path:
                 request_id TEXT,
                 status TEXT NOT NULL,
                 step_count INTEGER NOT NULL,
+                max_steps INTEGER NOT NULL DEFAULT 6,
+                claimed_by TEXT,
+                claimed_at TEXT,
+                heartbeat_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -141,6 +174,29 @@ def init_db(path: Path | None = None) -> Path:
                 created_at TEXT NOT NULL,
                 decided_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS documents (
+                doc_id TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                modified_ns INTEGER NOT NULL DEFAULT 0,
+                bill_key TEXT NOT NULL DEFAULT '',
+                identity_basis TEXT NOT NULL DEFAULT '',
+                account TEXT NOT NULL DEFAULT '',
+                period_start TEXT NOT NULL DEFAULT '',
+                period_end TEXT NOT NULL DEFAULT '',
+                issue_date TEXT NOT NULL DEFAULT '',
+                ingested_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS period_closures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period TEXT NOT NULL,
+                action TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                decided_by TEXT NOT NULL DEFAULT '',
+                snapshot TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
             """
         )
         _migrate_runs(conn)
@@ -161,6 +217,12 @@ def init_db(path: Path | None = None) -> Path:
             CREATE TRIGGER IF NOT EXISTS events_append_only_delete
             BEFORE DELETE ON events
             BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS period_closures_append_only_update
+            BEFORE UPDATE ON period_closures
+            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS period_closures_append_only_delete
+            BEFORE DELETE ON period_closures
+            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
             """
         )
         try:
@@ -190,10 +252,25 @@ def init_db(path: Path | None = None) -> Path:
             pass
         try:
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_period_closures_period"
+                " ON period_closures(period)"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_request_id"
                 " ON runs(request_id) WHERE request_id IS NOT NULL"
             )
         except sqlite3.OperationalError:
+            pass
+        try:
+            # Two workers must never write the same sequence number to one run.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_run_seq"
+                " ON events(run_id, seq)"
+            )
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
             pass
         conn.commit()
     finally:
@@ -206,8 +283,18 @@ def _migrate_runs(conn: sqlite3.Connection) -> None:
     existing = {
         row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
     }
-    if "request_id" not in existing:
-        conn.execute("ALTER TABLE runs ADD COLUMN request_id TEXT")
+    additions = {
+        "request_id": "TEXT",
+        "max_steps": "INTEGER NOT NULL DEFAULT 6",
+        "claimed_by": "TEXT",
+        "claimed_at": "TEXT",
+        "heartbeat_at": "TEXT",
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, ddl in additions.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
 
 
 def _migrate_approvals(conn: sqlite3.Connection) -> None:
@@ -267,22 +354,191 @@ def _migrate_ledger(conn: sqlite3.Connection) -> None:
 
 
 def create_run(
-    task: str, request_id: str | None = None, path: Path | None = None
+    task: str,
+    request_id: str | None = None,
+    path: Path | None = None,
+    *,
+    max_steps: int = 6,
+    status: str = "running",
 ) -> str:
+    """Insert a run row. The API queues ``pending``; direct callers get running."""
     run_id = f"r-{uuid.uuid4().hex[:12]}"
     conn = connect(path)
     try:
         now = _now()
         conn.execute(
             "INSERT INTO runs (run_id, task, request_id, status, step_count,"
-            " created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, task, request_id, "running", 0, now, now),
+            " max_steps, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, task, request_id, status, 0, max_steps, now, now),
         )
         conn.commit()
     finally:
         conn.close()
     return run_id
+
+
+def _iso_before(seconds: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+def claim_run(
+    owner: str,
+    path: Path | None = None,
+    *,
+    lease_seconds: float = 30.0,
+    max_attempts: int = 3,
+) -> dict | None:
+    """Atomically take one runnable job. Only one caller can win a run.
+
+    A job is runnable when it is queued, or when its last heartbeat is older
+    than the lease and another worker may therefore take it over. Runs made
+    before this schema have no claim, so they are never grabbed by accident.
+    """
+    conn = connect(path)
+    try:
+        cutoff = _iso_before(lease_seconds)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT run_id, task, max_steps, attempts FROM runs"
+            " WHERE cancel_requested = 0 AND attempts < ?"
+            "   AND (status = 'pending'"
+            "        OR (status = 'running' AND claimed_by IS NOT NULL"
+            "            AND heartbeat_at < ?))"
+            " ORDER BY created_at, rowid LIMIT 1",
+            (max_attempts, cutoff),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        now = _now()
+        cur = conn.execute(
+            "UPDATE runs SET status = 'running', claimed_by = ?,"
+            " claimed_at = ?, heartbeat_at = ?, attempts = attempts + 1,"
+            " updated_at = ?"
+            " WHERE run_id = ? AND cancel_requested = 0 AND attempts < ?"
+            "   AND (status = 'pending'"
+            "        OR (status = 'running' AND claimed_by IS NOT NULL"
+            "            AND heartbeat_at < ?))",
+            (owner, now, now, now, row["run_id"], max_attempts, cutoff),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "task": row["task"],
+            "max_steps": int(row["max_steps"]),
+            "attempts": int(row["attempts"]) + 1,
+        }
+    finally:
+        conn.close()
+
+
+def heartbeat_run(
+    run_id: str, owner: str, path: Path | None = None
+) -> bool:
+    """Extend the lease. Returns False when this worker no longer owns the run."""
+    conn = connect(path)
+    try:
+        cur = conn.execute(
+            "UPDATE runs SET heartbeat_at = ?, updated_at = ?"
+            " WHERE run_id = ? AND claimed_by = ? AND status = 'running'",
+            (_now(), _now(), run_id, owner),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def release_run(run_id: str, owner: str, path: Path | None = None) -> None:
+    """Drop the claim once the worker has written a settled status."""
+    conn = connect(path)
+    try:
+        conn.execute(
+            "UPDATE runs SET claimed_by = NULL, heartbeat_at = NULL,"
+            " updated_at = ? WHERE run_id = ? AND claimed_by = ?",
+            (_now(), run_id, owner),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reap_exhausted(
+    path: Path | None = None,
+    *,
+    lease_seconds: float = 30.0,
+    max_attempts: int = 3,
+) -> list[str]:
+    """Fail runs whose owner vanished after using every retry.
+
+    Retrying is safe because the ledger rejects duplicate bills, but an
+    endless restart loop would keep spending model quota. Fail closed.
+    """
+    conn = connect(path)
+    try:
+        cutoff = _iso_before(lease_seconds)
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT run_id FROM runs"
+            " WHERE status = 'running' AND claimed_by IS NOT NULL"
+            "   AND heartbeat_at < ? AND attempts >= ?",
+            (cutoff, max_attempts),
+        ).fetchall()
+        run_ids = [row["run_id"] for row in rows]
+        if run_ids:
+            conn.executemany(
+                "UPDATE runs SET status = 'failed', updated_at = ?"
+                " WHERE run_id = ?",
+                [(_now(), run_id) for run_id in run_ids],
+            )
+        conn.commit()
+        return run_ids
+    finally:
+        conn.close()
+
+
+def cancel_requested(run_id: str, path: Path | None = None) -> bool:
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            "SELECT cancel_requested, status FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(row["cancel_requested"]) or row["status"] == "cancelled"
+    finally:
+        conn.close()
+
+
+def fail_unclaimed_runs(path: Path | None = None) -> list[str]:
+    """Fail running rows that no worker owns.
+
+    Those rows predate the claim schema (or were inserted by hand). Nothing
+    will ever finish them, so leaving them as ``running`` would be a lie.
+    """
+    conn = connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT run_id FROM runs"
+            " WHERE status = 'running' AND claimed_by IS NULL"
+        ).fetchall()
+        run_ids = [row["run_id"] for row in rows]
+        if run_ids:
+            conn.executemany(
+                "UPDATE runs SET status = 'failed', updated_at = ?"
+                " WHERE run_id = ? AND status = 'running'"
+                "   AND claimed_by IS NULL",
+                [(_now(), run_id) for run_id in run_ids],
+            )
+        conn.commit()
+        return run_ids
+    finally:
+        conn.close()
 
 
 def find_run_by_request(request_id: str, path: Path | None = None) -> dict | None:
@@ -312,11 +568,16 @@ def list_runs(limit: int = 20, path: Path | None = None) -> list[dict]:
 
 
 def cancel_run(run_id: str, path: Path | None = None) -> bool:
-    """Mark a live run cancelled. Returns False if it already settled."""
+    """Mark a live run cancelled. Returns False if it already settled.
+
+    The flag is the durable signal: a worker in another process may be the
+    only one holding the run, and it will see this on its next step.
+    """
     conn = connect(path)
     try:
         cur = conn.execute(
-            "UPDATE runs SET status = 'cancelled', updated_at = ?"
+            "UPDATE runs SET status = 'cancelled', cancel_requested = 1,"
+            " updated_at = ?"
             " WHERE run_id = ? AND status IN ('pending', 'running', 'awaiting_approval')",
             (_now(), run_id),
         )
@@ -333,9 +594,14 @@ def append_event(
     data: dict | None = None,
     path: Path | None = None,
 ) -> dict:
-    """Append one structured event. ``seq`` is per-run and monotonic."""
+    """Append one structured event. ``seq`` is per-run and monotonic.
+
+    The write lock is taken before the max lookup, so a decision endpoint and
+    a worker in different processes cannot both claim the same sequence.
+    """
     conn = connect(path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT COALESCE(MAX(seq), -1) AS m FROM events WHERE run_id = ?",
             (run_id,),
@@ -456,6 +722,172 @@ def find_ledger_posting(
         conn.close()
 
 
+def _closed_period(
+    conn: sqlite3.Connection,
+    bill_key: str,
+    source_doc: str,
+    recorded_at: str,
+) -> str | None:
+    """The month this row would change, if that month is closed.
+
+    Called while holding a write lock so a close cannot slip between the
+    check and the insert.
+    """
+    row = conn.execute(
+        "SELECT period_end, issue_date FROM documents WHERE doc_id = ?",
+        (source_doc,),
+    ).fetchone()
+    period, _ = period_for(
+        bill_key, source_doc, recorded_at, dict(row) if row else None
+    )
+    closure = conn.execute(
+        "SELECT action FROM period_closures"
+        " WHERE period = ? ORDER BY id DESC LIMIT 1",
+        (period,),
+    ).fetchone()
+    return period if closure and closure["action"] == "close" else None
+
+
+def closed_period_for(
+    bill_key: str,
+    source_doc: str,
+    path: Path | None = None,
+) -> str | None:
+    """Advisory check for callers that must not consume a ticket.
+
+    The insert guard remains authoritative: it rechecks under the write
+    lock, so a close that lands after this call still refuses the posting.
+    """
+    conn = connect(path)
+    try:
+        return _closed_period(conn, bill_key, source_doc, _now())
+    finally:
+        conn.close()
+
+
+def closed_periods(path: Path | None = None) -> set[str]:
+    conn = connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT period, action FROM period_closures ORDER BY id"
+        ).fetchall()
+        state: dict[str, str] = {}
+        for row in rows:
+            state[row["period"]] = row["action"]
+        return {period for period, action in state.items() if action == "close"}
+    finally:
+        conn.close()
+
+
+def list_period_closures(path: Path | None = None) -> list[dict]:
+    conn = connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT id, period, action, note, decided_by, snapshot, created_at"
+            " FROM period_closures ORDER BY id"
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["snapshot"] = json.loads(item.get("snapshot") or "{}")
+            except (TypeError, ValueError):
+                item["snapshot"] = {}
+            out.append(item)
+        return out
+    finally:
+        conn.close()
+
+
+def close_period(
+    period: str,
+    note: str,
+    decided_by: str,
+    snapshot: dict,
+    path: Path | None = None,
+) -> dict:
+    """Append a close action, with the totals it froze."""
+    valid_period(period)
+    cleaned_note = note.strip()
+    cleaned_by = decided_by.strip()
+    if not cleaned_note or not cleaned_by:
+        raise ValueError("a close needs a note and an operator")
+
+    conn = connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        latest = conn.execute(
+            "SELECT action FROM period_closures"
+            " WHERE period = ? ORDER BY id DESC LIMIT 1",
+            (period,),
+        ).fetchone()
+        if latest and latest["action"] == "close":
+            raise PeriodAlreadyClosed(period)
+        cur = conn.execute(
+            "INSERT INTO period_closures (period, action, note, decided_by,"
+            " snapshot, created_at) VALUES (?, 'close', ?, ?, ?, ?)",
+            (
+                period,
+                cleaned_note,
+                cleaned_by,
+                json.dumps(snapshot, sort_keys=True),
+                _now(),
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, period, action, note, decided_by, snapshot, created_at"
+            " FROM period_closures WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+        item = dict(row)
+        item["snapshot"] = snapshot
+        return item
+    finally:
+        conn.close()
+
+
+def reopen_period(
+    period: str,
+    note: str,
+    decided_by: str,
+    path: Path | None = None,
+) -> dict:
+    """Append a reopen action. The close record stays in the history."""
+    valid_period(period)
+    cleaned_note = note.strip()
+    cleaned_by = decided_by.strip()
+    if not cleaned_note or not cleaned_by:
+        raise ValueError("a reopen needs a note and an operator")
+
+    conn = connect(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        latest = conn.execute(
+            "SELECT action FROM period_closures"
+            " WHERE period = ? ORDER BY id DESC LIMIT 1",
+            (period,),
+        ).fetchone()
+        if latest is None or latest["action"] != "close":
+            raise PeriodNotClosed(period)
+        cur = conn.execute(
+            "INSERT INTO period_closures (period, action, note, decided_by,"
+            " snapshot, created_at) VALUES (?, 'reopen', ?, ?, '{}', ?)",
+            (period, cleaned_note, cleaned_by, _now()),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, period, action, note, decided_by, snapshot, created_at"
+            " FROM period_closures WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+        item = dict(row)
+        item["snapshot"] = {}
+        return item
+    finally:
+        conn.close()
+
+
 def insert_ledger_entry(
     run_id: str,
     entry_id: str,
@@ -468,6 +900,11 @@ def insert_ledger_entry(
 ) -> None:
     conn = connect(path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        recorded_at = _now()
+        closed = _closed_period(conn, bill_key, source_doc, recorded_at)
+        if closed:
+            raise PeriodClosed(closed)
         cur = conn.execute(
             "INSERT INTO ledger (entry_id, run_id, amount, currency, source_doc,"
             " bill_key, kind, created_at)"
@@ -494,7 +931,7 @@ def insert_ledger_entry(
                 currency,
                 source_doc,
                 bill_key,
-                _now(),
+                recorded_at,
                 run_id,
                 entry_id,
                 bill_key,
@@ -530,6 +967,31 @@ def reverse_ledger_entry(
 
     conn = connect(path)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        original = conn.execute(
+            "SELECT id, entry_id, run_id, amount, currency, source_doc,"
+            " bill_key, kind, reverses_id, reason, approved_by, created_at"
+            " FROM ledger WHERE id = ?",
+            (ledger_id,),
+        ).fetchone()
+        if original is None:
+            raise UnknownLedgerEntry(ledger_id)
+        if original["kind"] != "posting":
+            raise NotReversible(ledger_id)
+        existing = conn.execute(
+            "SELECT 1 FROM ledger WHERE kind = 'reversal' AND reverses_id = ?",
+            (ledger_id,),
+        ).fetchone()
+        if existing is not None:
+            raise AlreadyReversed(ledger_id)
+        closed = _closed_period(
+            conn,
+            str(original["bill_key"]),
+            str(original["source_doc"]),
+            str(original["created_at"]),
+        )
+        if closed:
+            raise PeriodClosed(closed)
         try:
             cur = conn.execute(
                 "INSERT INTO ledger (entry_id, run_id, amount, currency,"
@@ -555,13 +1017,6 @@ def reverse_ledger_entry(
         except sqlite3.IntegrityError:
             raise AlreadyReversed(ledger_id) from None
         if cur.rowcount == 0:
-            row = conn.execute(
-                "SELECT kind FROM ledger WHERE id = ?", (ledger_id,)
-            ).fetchone()
-            if row is None:
-                raise UnknownLedgerEntry(ledger_id)
-            if row["kind"] != "posting":
-                raise NotReversible(ledger_id)
             raise AlreadyReversed(ledger_id)
         row = conn.execute(
             "SELECT id, entry_id, run_id, amount, currency, source_doc,"
@@ -597,11 +1052,110 @@ def list_ledger(path: Path | None = None) -> list[dict]:
         conn.close()
 
 
+def upsert_document(
+    doc_id: str,
+    *,
+    source_name: str,
+    content_hash: str,
+    size_bytes: int,
+    modified_ns: int,
+    bill_key: str,
+    identity_basis: str,
+    account: str = "",
+    period_start: str = "",
+    period_end: str = "",
+    issue_date: str = "",
+    ingested_at: str | None = None,
+    path: Path | None = None,
+) -> None:
+    """Record what ingest knows about one corpus document.
+
+    Identity is computed from the text at ingest time and stored beside the
+    source file. The corpus stays the retrieval source of truth; this table is
+    the provenance and duplicate-detection read model.
+    """
+    conn = connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO documents (doc_id, source_name, content_hash,"
+            " size_bytes, modified_ns, bill_key, identity_basis, account,"
+            " period_start, period_end, issue_date, ingested_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id) DO UPDATE SET"
+            " source_name = excluded.source_name,"
+            " content_hash = excluded.content_hash,"
+            " size_bytes = excluded.size_bytes,"
+            " modified_ns = excluded.modified_ns,"
+            " bill_key = excluded.bill_key,"
+            " identity_basis = excluded.identity_basis,"
+            " account = excluded.account,"
+            " period_start = excluded.period_start,"
+            " period_end = excluded.period_end,"
+            " issue_date = excluded.issue_date,"
+            " ingested_at = excluded.ingested_at",
+            (
+                doc_id,
+                source_name,
+                content_hash,
+                int(size_bytes),
+                int(modified_ns),
+                bill_key,
+                identity_basis,
+                account,
+                period_start,
+                period_end,
+                issue_date,
+                ingested_at or _now(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_documents(path: Path | None = None) -> list[dict]:
+    conn = connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT doc_id, source_name, content_hash, size_bytes, modified_ns,"
+            " bill_key, identity_basis, account, period_start, period_end,"
+            " issue_date, ingested_at FROM documents ORDER BY doc_id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def prune_documents(keep: Iterable[str], path: Path | None = None) -> int:
+    """Drop metadata for documents no longer present in the corpus."""
+    doc_ids = list(keep)
+    conn = connect(path)
+    try:
+        if not doc_ids:
+            cur = conn.execute("DELETE FROM documents")
+        else:
+            marks = ",".join("?" for _ in doc_ids)
+            cur = conn.execute(
+                f"DELETE FROM documents WHERE doc_id NOT IN ({marks})", doc_ids
+            )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def table_counts(path: Path | None = None) -> dict[str, int]:
     conn = connect(path)
     try:
         out = {}
-        for table in ("runs", "events", "ledger", "approvals"):
+        for table in (
+            "runs",
+            "events",
+            "ledger",
+            "approvals",
+            "documents",
+            "period_closures",
+        ):
             row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
             out[table] = int(row["n"])
         return out
@@ -615,6 +1169,7 @@ def archive_and_clear(path: Path | None = None) -> Path:
     Rows are never deleted in place: the append-only triggers are only
     dropped inside this one maintenance transaction, after the archive is
     written. The old ledger survives as a file you can open and compare.
+    Document metadata describes the corpus, not the ledger, so it is kept.
     """
     target = path or db_path()
     archive_dir = target.parent / "archive"
@@ -637,10 +1192,13 @@ def archive_and_clear(path: Path | None = None) -> Path:
             DROP TRIGGER IF EXISTS ledger_append_only_delete;
             DROP TRIGGER IF EXISTS events_append_only_update;
             DROP TRIGGER IF EXISTS events_append_only_delete;
+            DROP TRIGGER IF EXISTS period_closures_append_only_update;
+            DROP TRIGGER IF EXISTS period_closures_append_only_delete;
             DELETE FROM ledger;
             DELETE FROM events;
             DELETE FROM approvals;
             DELETE FROM runs;
+            DELETE FROM period_closures;
             CREATE TRIGGER ledger_append_only_update
             BEFORE UPDATE ON ledger
             BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
@@ -653,6 +1211,12 @@ def archive_and_clear(path: Path | None = None) -> Path:
             CREATE TRIGGER events_append_only_delete
             BEFORE DELETE ON events
             BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END;
+            CREATE TRIGGER period_closures_append_only_update
+            BEFORE UPDATE ON period_closures
+            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
+            CREATE TRIGGER period_closures_append_only_delete
+            BEFORE DELETE ON period_closures
+            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
             """
         )
         conn.commit()

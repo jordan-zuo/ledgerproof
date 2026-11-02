@@ -43,11 +43,10 @@ def test_read_only_demo_blocks_writes_but_serves_reads(tmp_path, monkeypatch) ->
 def test_a_configured_token_is_required_for_writes(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch, read_only=False, token="s3cret")
 
-    assert client.get("/config").json() == {
-        "mode": "token",
-        "read_only": False,
-        "auth_required": True,
-    }
+    state = client.get("/config").json()
+    assert state["mode"] == "token"
+    assert state["read_only"] is False
+    assert state["auth_required"] is True
     missing = client.post("/admin/reset", json={"confirm": True})
     wrong = client.post(
         "/admin/reset", json={"confirm": True}, headers={"X-API-Token": "nope"}

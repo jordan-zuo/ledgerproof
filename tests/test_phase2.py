@@ -93,21 +93,21 @@ def test_run_list_is_newest_first_and_limited(isolated_db) -> None:
 
 def test_request_id_replay_returns_the_same_run(isolated_db, monkeypatch) -> None:
     monkeypatch.setattr(api, "TEST_CLIENT", _ScriptedClient([]))
-    client = TestClient(api.app)
 
-    first = client.post(
-        "/run", json={"task": "t", "max_steps": 3, "request_id": "req-1"}
-    )
-    second = client.post(
-        "/run", json={"task": "t", "max_steps": 3, "request_id": "req-1"}
-    )
+    with TestClient(api.app) as client:
+        first = client.post(
+            "/run", json={"task": "t", "max_steps": 3, "request_id": "req-1"}
+        )
+        second = client.post(
+            "/run", json={"task": "t", "max_steps": 3, "request_id": "req-1"}
+        )
 
-    assert first.status_code == 202
-    assert second.status_code == 202
-    assert first.json()["replayed"] is False
-    assert second.json()["replayed"] is True
-    assert first.json()["run_id"] == second.json()["run_id"]
-    assert len(client.get("/runs").json()["runs"]) == 1
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["replayed"] is False
+        assert second.json()["replayed"] is True
+        assert first.json()["run_id"] == second.json()["run_id"]
+        assert len(client.get("/runs").json()["runs"]) == 1
 
 
 def test_cancel_running_run_discards_the_inflight_decision(
@@ -115,29 +115,53 @@ def test_cancel_running_run_discards_the_inflight_decision(
 ) -> None:
     model = _BlockingClient()
     monkeypatch.setattr(api, "TEST_CLIENT", model)
-    client = TestClient(api.app)
 
-    started = client.post("/run", json={"task": "post a bill", "max_steps": 5})
-    run_id = started.json()["run_id"]
-    assert model.started.wait(5)
+    with TestClient(api.app) as client:
+        started = client.post("/run", json={"task": "post a bill", "max_steps": 5})
+        run_id = started.json()["run_id"]
+        assert model.started.wait(5)
 
-    cancelled = client.post(f"/runs/{run_id}/cancel")
+        cancelled = client.post(f"/runs/{run_id}/cancel")
 
-    assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "cancelled"
-    assert store.get_run(run_id)["status"] == "cancelled"
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+        assert store.get_run(run_id)["status"] == "cancelled"
 
-    events = wait_for_event(client, run_id, "cancelled")
-    model.release.set()
-    _wait_worker_exit(run_id)
+        events = wait_for_event(client, run_id, "cancelled")
+        model.release.set()
+        _wait_worker_exit(run_id)
 
-    assert store.get_run(run_id)["status"] == "cancelled"
-    assert not any(event["kind"] == "decision" for event in events)
-    assert client.get("/ledger").json()["entries"] == []
-    assert client.post(f"/runs/{run_id}/cancel").status_code == 409
+        assert store.get_run(run_id)["status"] == "cancelled"
+        assert not any(event["kind"] == "decision" for event in events)
+        assert client.get("/ledger").json()["entries"] == []
+        assert client.post(f"/runs/{run_id}/cancel").status_code == 409
 
-    stream = client.get(f"/runs/{run_id}/stream")
-    assert '"status": "cancelled"' in stream.text
+        stream = client.get(f"/runs/{run_id}/stream")
+        assert '"status": "cancelled"' in stream.text
+
+
+def test_cancel_reaches_a_worker_with_no_local_signal(
+    isolated_db, monkeypatch
+) -> None:
+    """A cancel can arrive in another process, so the DB flag must stop it."""
+    model = _BlockingClient()
+    monkeypatch.setattr(api, "TEST_CLIENT", model)
+
+    with TestClient(api.app) as client:
+        run_id = client.post(
+            "/run", json={"task": "post a bill", "max_steps": 5}
+        ).json()["run_id"]
+        assert model.started.wait(5)
+
+        # Only the database changes here, as if the click landed elsewhere.
+        assert store.cancel_run(run_id) is True
+        model.release.set()
+        _wait_worker_exit(run_id)
+
+        assert store.get_run(run_id)["status"] == "cancelled"
+        events = store.get_events(run_id)
+        assert not any(e["kind"] in {"decision", "finish"} for e in events)
+        assert client.get("/ledger").json()["entries"] == []
 
 
 def test_cancel_at_a_gate_denies_the_ticket(isolated_db, monkeypatch) -> None:
@@ -148,32 +172,34 @@ def test_cancel_at_a_gate_denies_the_ticket(isolated_db, monkeypatch) -> None:
             [{"action": "request_approval", "args": {}, "reason": "need a human"}]
         ),
     )
-    client = TestClient(api.app)
-    run_id = client.post("/run", json={"task": "t", "max_steps": 3}).json()["run_id"]
-    settled = wait_for_run(client, run_id)
-    assert settled["run"]["status"] == "awaiting_approval"
+    with TestClient(api.app) as client:
+        run_id = client.post(
+            "/run", json={"task": "t", "max_steps": 3}
+        ).json()["run_id"]
+        settled = wait_for_run(client, run_id)
+        assert settled["run"]["status"] == "awaiting_approval"
 
-    ticket = client.get("/approvals").json()["pending"][0]
-    cancelled = client.post(f"/runs/{run_id}/cancel")
+        ticket = client.get("/approvals").json()["pending"][0]
+        cancelled = client.post(f"/runs/{run_id}/cancel")
 
-    assert cancelled.status_code == 200
-    assert cancelled.json()["tickets_denied"] == [ticket["ticket_id"]]
-    assert store.get_run(run_id)["status"] == "cancelled"
-    assert client.get("/approvals").json()["pending"] == []
+        assert cancelled.status_code == 200
+        assert cancelled.json()["tickets_denied"] == [ticket["ticket_id"]]
+        assert store.get_run(run_id)["status"] == "cancelled"
+        assert client.get("/approvals").json()["pending"] == []
 
-    decided = store.get_approval(ticket["ticket_id"])
-    assert decided["decided"] == 1
-    assert decided["approved"] == 0
-    assert decided["note"] == "cancelled by user"
+        decided = store.get_approval(ticket["ticket_id"])
+        assert decided["decided"] == 1
+        assert decided["approved"] == 0
+        assert decided["note"] == "cancelled by user"
 
-    late = client.post(
-        f"/approvals/{ticket['ticket_id']}/decide", json={"approved": True}
-    )
-    assert late.status_code == 409
+        late = client.post(
+            f"/approvals/{ticket['ticket_id']}/decide", json={"approved": True}
+        )
+        assert late.status_code == 409
 
-    events = client.get(f"/runs/{run_id}").json()["events"]
-    assert any(event["kind"] == "cancelled" for event in events)
-    assert any(event["kind"] == "denied" for event in events)
+        events = client.get(f"/runs/{run_id}").json()["events"]
+        assert any(event["kind"] == "cancelled" for event in events)
+        assert any(event["kind"] == "denied" for event in events)
 
 
 def test_second_decision_on_a_ledger_ticket_is_refused(isolated_db) -> None:
