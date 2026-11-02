@@ -1,4 +1,4 @@
-# enterprise-agent-orchestrator: Deterministic Workflow Orchestration with Approval Gates
+# Ledgerproof: Deterministic Bill Posting with an Approval Gate
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
@@ -18,7 +18,7 @@ python -m pytest -q
 python scripts/evaluate.py
 ```
 
-Live read-only demo: https://enterprise-agent-orchestrator.onrender.com/ui
+Live read-only demo: https://ledgerproof-d1ve.onrender.com/ui
 
 [DEMO.md](DEMO.md) is the two-minute walkthrough. [CASE_STUDY.md](CASE_STUDY.md) covers the design, the evidence, and the limits.
 
@@ -26,7 +26,7 @@ Live read-only demo: https://enterprise-agent-orchestrator.onrender.com/ui
 
 The app is one Python process over SQLite, so it runs on a native Python runtime. There is no Dockerfile, no container build, and no image registry. `render.yaml` is a Render blueprint for its Python runtime, and `Procfile` is the same start command for Railway, Heroku, or any platform that can run `python run.py`.
 
-[Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/enterprise-agent-orchestrator)
+[Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/ledgerproof)
 
 The blueprint sets `READ_ONLY_DEMO=1`, disables the inbox watcher, and opens the committed snapshot at `demo/ledger.db`. Visitors see the real ledger, reconciliation, periods, runs, and exports without a model key; only a request carrying `APP_TOKEN` can write, and that variable can stay empty for a pure read-only demo.
 

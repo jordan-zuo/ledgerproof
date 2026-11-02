@@ -1,5 +1,5 @@
 ---
-title: Enterprise Agent Orchestrator
+title: Ledgerproof
 emoji: 🧾
 colorFrom: indigo
 colorTo: green
@@ -11,7 +11,7 @@ pinned: false
 short_description: Approval-gated bill agent with an append-only ledger
 ---
 
-# Enterprise Agent Orchestrator
+# Ledgerproof
 
 A read-only demo of an approval-gated agent that reads utility bills, proves the
 amount it wants to post, pauses for a human above a threshold, and writes an
@@ -25,6 +25,6 @@ The ledger is a snapshot of real agent runs on the three sample bills in the
 source repository. Closing a month, reversing a posting, or running a new task
 requires the owner token and is not available here.
 
-- Source and full setup: https://github.com/jordan-zuo/enterprise-agent-orchestrator
-- Two-minute walkthrough: https://github.com/jordan-zuo/enterprise-agent-orchestrator/blob/main/DEMO.md
-- Case study: https://github.com/jordan-zuo/enterprise-agent-orchestrator/blob/main/CASE_STUDY.md
+- Source and full setup: https://github.com/jordan-zuo/ledgerproof
+- Two-minute walkthrough: https://github.com/jordan-zuo/ledgerproof/blob/main/DEMO.md
+- Case study: https://github.com/jordan-zuo/ledgerproof/blob/main/CASE_STUDY.md

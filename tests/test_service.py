@@ -70,7 +70,7 @@ def test_ui_and_corpus_endpoints(isolated_db) -> None:
     res_ui = client.get("/ui")
     assert res_ui.status_code == 200
     assert "text/html" in res_ui.headers["content-type"]
-    assert "Enterprise Agent Orchestrator" in res_ui.text
+    assert "Ledgerproof" in res_ui.text
     # Corpus
     res_corpus = client.get("/corpus")
     assert res_corpus.status_code == 200

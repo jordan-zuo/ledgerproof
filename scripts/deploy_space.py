@@ -2,7 +2,7 @@
 
 Usage (repo root):
     python scripts/deploy_space.py --build
-    python scripts/deploy_space.py --upload jordan6/enterprise-agent-orchestrator
+    python scripts/deploy_space.py --upload jordan6/ledgerproof
 
 The Space is a filtered copy of this repository plus the read-only launcher in
 ``space/``. It never contains ``.env``, ``HANDOFF.md``, the live database, tests,

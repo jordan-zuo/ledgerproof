@@ -21,7 +21,7 @@ from scripts.api import app  # noqa: E402
 
 gr.mount_gradio_app(
     app,
-    gr.Blocks(title="Enterprise Agent Orchestrator"),
+    gr.Blocks(title="Ledgerproof"),
     path="/_gradio",
 )
 

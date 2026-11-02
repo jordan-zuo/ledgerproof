@@ -71,7 +71,7 @@ A retrieval cache keyed by document and query, so repeated runs do not re-extrac
 
 ## Links
 
-- Repository: https://github.com/jordan-zuo/enterprise-agent-orchestrator
-- Live read-only instance: https://enterprise-agent-orchestrator.onrender.com/ui
+- Repository: https://github.com/jordan-zuo/ledgerproof
+- Live read-only instance: https://ledgerproof-d1ve.onrender.com/ui
 - Two-minute walkthrough: [DEMO.md](DEMO.md)
 - Live judged report: [eval/report.md](eval/report.md)

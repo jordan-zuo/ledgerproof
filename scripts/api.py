@@ -84,7 +84,7 @@ async def lifespan(_: FastAPI) -> Any:
         WORKER.stop()
 
 
-app = FastAPI(title="enterprise-agent-orchestrator", lifespan=lifespan)
+app = FastAPI(title="Ledgerproof", lifespan=lifespan)
 
 TEST_CLIENT: Any = None
 
@@ -315,7 +315,7 @@ def index(request: Request) -> Any:
     if "text/html" in request.headers.get("accept", "") and index_file.exists():
         return FileResponse(index_file)
     return {
-        "service": "enterprise-agent-orchestrator",
+        "service": "ledgerproof",
         "ui": "/ui",
         "docs": "/docs",
         "health": "/health",

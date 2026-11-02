@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: enterprise-agent-orchestrator
+    name: ledgerproof
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
