@@ -39,7 +39,7 @@ The blueprint sets `READ_ONLY_DEMO=1`, disables the inbox watcher, and opens the
 | `APP_INBOX_WATCH=0` | Stops the inbox poller on a host with no inbox to watch. |
 | `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. Only needed for owner-run tasks, not for browsing. |
 
-The free Render plan has an ephemeral filesystem and sleeps when idle. The committed snapshot is restored on every deploy or restart, so the read-only demo always comes back with the same rows, and the first visit after a pause can take 30 to 60 seconds. For durable owner writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk.
+The free Render plan has an ephemeral filesystem and sleeps when idle. The committed snapshot is restored on every deploy or restart, so the read-only demo always comes back with the same rows, and the first visit after a pause can take 30 to 60 seconds. For durable owner writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk. The hosted demo is connected through the Render GitHub App, so a push to `main` deploys it automatically.
 
 Before a public deploy, run the check that matters:
 
