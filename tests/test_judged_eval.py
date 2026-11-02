@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,11 @@ from scripts.judged_evaluate import (
 
 def _case(case_id: str) -> dict:
     return {case["id"]: case for case in load_suite()["cases"]}[case_id]
+
+
+def _corpus() -> dict:
+    path = Path(__file__).resolve().parent.parent / "data" / "corpus.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _record(ledger: list[dict], *, status: str = "done", gated: bool = False, tickets: list[dict] | None = None) -> dict:
@@ -60,7 +66,7 @@ def _spec(label: str, key_env: str = "KEY_A") -> ModelSpec:
         model=f"model-{label}",
         base_url="https://example.invalid/v1",
         api_key_env=key_env,
-        max_output_tokens=1200,
+        max_output_tokens=2400,
     )
 
 
@@ -125,6 +131,145 @@ def test_hard_checks_reject_wrong_amount_and_missing_gate() -> None:
     assert {"gate", "tickets", "ticket_approved"} <= failed
 
 
+def test_answer_grounded_requires_the_term_in_a_snippet() -> None:
+    case = _case("period-question")
+    grounded = {
+        "status": "done",
+        "failure_reason": "",
+        "steps": 2,
+        "settled": False,
+        "decisions": [
+            {
+                "step": 2,
+                "action": "finish",
+                "args": {},
+                "reason": "No. Its billing period is 5 March 2023 to 4 April 2023.",
+            }
+        ],
+        "evidence": [
+            {
+                "doc_id": "agl-better-bills-sample-bill-necf",
+                "snippet": "Bill period: 5 March 2023 to 4 April 2023 (31 Days)",
+                "text": "",
+            }
+        ],
+        "ledger": [],
+        "tickets": [],
+        "history": [],
+        "latency_ms": 1.0,
+    }
+    assert hard_checks(case, grounded)["passed"] is True
+
+    ungrounded = dict(grounded)
+    ungrounded["evidence"] = [
+        {"doc_id": "origin-standing-bill-modified-alexcarter", "snippet": "Bill period 14 Jul 15 - 14 Oct 15", "text": ""}
+    ]
+    failed = {check["name"] for check in hard_checks(case, ungrounded)["checks"] if not check["ok"]}
+    assert "answer_grounded" in failed
+
+
+def test_answer_terms_read_only_the_finish_reason() -> None:
+    case = _case("period-question")
+    record = {
+        "status": "done",
+        "failure_reason": "",
+        "steps": 2,
+        "settled": False,
+        "decisions": [
+            {"step": 1, "action": "ledger_write", "args": {}, "reason": "No, March to April"}
+        ],
+        "evidence": [
+            {"doc_id": "agl-better-bills-sample-bill-necf", "snippet": "Bill period: 5 March 2023 to 4 April 2023"}
+        ],
+        "ledger": [],
+        "tickets": [],
+        "history": [],
+        "latency_ms": 1.0,
+    }
+    failed = {check["name"] for check in hard_checks(case, record)["checks"] if not check["ok"]}
+    assert "answer_terms" in failed
+
+    record["decisions"].append({"step": 2, "action": "finish", "args": {}, "reason": "No, March to April"})
+    failed = {check["name"] for check in hard_checks(case, record)["checks"] if not check["ok"]}
+    assert "answer_terms" not in failed
+
+
+def test_write_attempts_count_validated_distinct_bills() -> None:
+    case = _case("absent-doc")
+    record = {
+        "status": "failed",
+        "failure_reason": "no matching document",
+        "steps": 3,
+        "settled": False,
+        "decisions": [
+            {"step": 2, "action": "ledger_write", "args": {"entry_id": "x", "amount": 79.87, "source_doc": "aer"}},
+            {"step": 3, "action": "ledger_write", "args": {"entry_id": "x", "amount": "79.87", "source_doc": "aer"}},
+        ],
+        "evidence": [],
+        "ledger": [],
+        "tickets": [],
+        "history": [],
+        "latency_ms": 1.0,
+    }
+    check = next(item for item in hard_checks(case, record)["checks"] if item["name"] == "write_attempts")
+    assert check["ok"] is False
+    assert check["detail"] == "1 <= 0"
+
+    record["decisions"].append(
+        {"step": 4, "action": "ledger_write", "args": {"entry_id": "y", "amount": 63.70, "source_doc": "agl"}}
+    )
+    check = next(item for item in hard_checks(case, record)["checks"] if item["name"] == "write_attempts")
+    assert check["detail"] == "2 <= 0"
+
+    record["decisions"] = [
+        {"step": 2, "action": "ledger_write", "args": {"entry_id": "", "amount": -1, "source_doc": ""}}
+    ]
+    check = next(item for item in hard_checks(case, record)["checks"] if item["name"] == "write_attempts")
+    assert check["ok"] is True
+
+
+def test_judge_payload_keeps_the_snippet_the_agent_saw() -> None:
+    from scripts.judge import _compact_record
+
+    snippet = "x" * 450 + " Bill period: 5 March 2023 to 4 April 2023"
+    record = {
+        "status": "done",
+        "failure_reason": "",
+        "steps": 2,
+        "settled": False,
+        "decisions": [],
+        "evidence": [
+            {"doc_id": "agl-better-bills-sample-bill-necf", "query": "period", "snippet": snippet},
+            {"doc_id": "agl-better-bills-sample-bill-necf", "query": "period", "snippet": snippet},
+        ],
+        "write_attempts": 2,
+        "blocked": 1,
+        "history": [],
+        "hard": {"checks": []},
+    }
+    compact = _compact_record(record)
+    assert len(compact["evidence"]) == 1
+    assert "5 March 2023" in compact["evidence"][0]["snippet"]
+    assert compact["write_attempts"] == 2
+    assert compact["blocked"] == 1
+
+
+def test_ticket_denied_requires_no_row_landed() -> None:
+    denied_case = _case("origin-gated-deny")
+    denied_ticket = [{"ticket_id": "t-1", "approved": False, "denied": True}]
+    denied = _record([], status="failed", gated=True, tickets=denied_ticket)
+    assert hard_checks(denied_case, denied)["passed"] is True
+
+    leaked = _record(
+        [{"entry_id": "j-1", "amount": 13376.47, "source_doc": "origin-standing-bill-modified-alexcarter"}],
+        status="failed",
+        gated=True,
+        tickets=denied_ticket,
+    )
+    failed = {check["name"] for check in hard_checks(denied_case, leaked)["checks"] if not check["ok"]}
+    assert "ticket_denied" in failed
+
+
 def test_judge_prompt_embeds_rubric_gold_and_hard_checks() -> None:
     agl = _case("agl-due-post")
     record = _record([{"entry_id": "j-1", "amount": 63.70, "source_doc": "agl-better-bills-sample-bill-necf"}])
@@ -157,7 +302,7 @@ def test_judge_retries_malformed_json_then_parses(monkeypatch: pytest.MonkeyPatc
     assert result["verdict"]["verdict"] == "pass"
     assert len(provider.calls) == 2
     assert provider.calls[0]["temperature"] == 0
-    assert provider.calls[0]["max_tokens"] == 1200
+    assert provider.calls[0]["max_tokens"] == 2400
     assert "response_format" not in provider.calls[0]
 
     bad = _Provider(["nope", "still nope"])
@@ -258,9 +403,22 @@ def test_report_aggregates_agreement_and_dimension_means() -> None:
         "command": "test",
     }
     calibration = {"ok": True, "passed": 3, "total": 3, "probes": []}
-    summary = aggregate([passing, failing], calibration, meta, judge_required=True)
+    unjudged = {
+        "id": "case-c",
+        "status": "done",
+        "steps": 4,
+        "latency_ms": 300.0,
+        "hard": {"passed": True, "checks": []},
+        "judge": None,
+        "judge_error": "all judge models cooling",
+    }
+    summary = aggregate([passing, failing, unjudged], calibration, meta, judge_required=True)
 
-    assert summary["hard_pass_rate"] == 0.5
+    assert summary["hard_passed"] == 2
+    assert summary["hard_pass_rate"] == 0.6667
+    assert summary["judge_passed"] == 1
+    assert summary["judge_judged"] == 2
+    assert summary["judge_unavailable"] == 1
     assert summary["judge_pass_rate"] == 0.5
     assert summary["agreement"] == 1.0
     assert summary["judge_stricter"] == 0
@@ -271,6 +429,7 @@ def test_report_aggregates_agreement_and_dimension_means() -> None:
     report = render_report(summary, judge_required=True)
     assert RUBRIC_SHA in report
     assert "case-a" in report and "case-b" in report
+    assert "1/2 scored (1 unavailable)" in report
     assert "Judge calibration" in report
 
 
@@ -291,7 +450,7 @@ class _ScriptedClient:
 
 def test_live_case_captures_ledger_and_isolates_runs() -> None:
     agl = _case("agl-due-post")
-    corpus = json.loads((__import__("pathlib").Path(__file__).resolve().parent.parent / "data" / "corpus.json").read_text(encoding="utf-8"))
+    corpus = _corpus()
     script = [
         {"action": "retrieve", "args": {"query": "AGL amount due"}, "reason": "find the bill"},
         {
@@ -313,3 +472,25 @@ def test_live_case_captures_ledger_and_isolates_runs() -> None:
     second = run_live_case(agl, _ScriptedClient(script), "scripted", corpus)
     assert len(second["ledger"]) == 1
     assert second["agent_models"] == ["scripted"]
+
+
+def test_live_denied_gate_posts_nothing() -> None:
+    denied = _case("origin-gated-deny")
+    script = [
+        {"action": "retrieve", "args": {"query": "Origin total amount due"}, "reason": "find the bill"},
+        {
+            "action": "ledger_write",
+            "args": {"entry_id": "eval-deny", "amount": 13376.47, "source_doc": "origin-standing-bill-modified-alexcarter"},
+            "reason": "post the total",
+        },
+    ]
+
+    record = run_live_case(denied, _ScriptedClient(script), "scripted", _corpus())
+
+    assert record["status"] == "failed"
+    assert record["ledger"] == []
+    assert len(record["tickets"]) == 1
+    assert record["tickets"][0]["denied"] is True
+    assert record["tickets"][0]["approved"] is False
+    assert record["blocked"] == 0
+    assert record["hard"]["passed"] is True

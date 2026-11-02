@@ -34,6 +34,23 @@ def test_retrieval_no_match_says_so() -> None:
     assert event == "retrieve [penguin migration]: no matching document"
 
 
+def test_retrieval_names_an_absent_task_entity_instead_of_substituting() -> None:
+    docs = {"gas-bill": "greenhouse gas emissions and an amount due of 79.87"}
+    state = AgentState(task="Post the amount due from the Jemena gas bill.")
+    event = RetrievalTool(docs).execute(state, RetrievalArgs(query="gas bill"))
+    assert "no document mentions" in event
+    assert "jemena" in event
+    assert state.evidence == []
+
+
+def test_retrieval_does_not_treat_a_month_as_an_absent_entity() -> None:
+    docs = {"agl-bill": "Bill period: 5 March 2023 to 4 April 2023. Amount due 63.70"}
+    state = AgentState(task="Does the AGL bill cover December 2023?")
+    event = RetrievalTool(docs).execute(state, RetrievalArgs(query="AGL December 2023"))
+    assert "agl-bill" in event
+    assert len(state.evidence) == 1
+
+
 def test_retrieval_blank_query_rejected() -> None:
     with pytest.raises(ValidationError):
         RetrievalArgs(query="   ")

@@ -169,7 +169,8 @@ def reasoning_body(provider: str, mode: str | None) -> dict[str, Any]:
     if PROVIDERS.get(provider, {}).get("reasoning") == "omit":
         return {}
     off = value in {"off", "none", "false", "0"}
-    return {"reasoning_effort": "none" if off else value}
+    # Groq accepts only low, medium, or high, so off means its minimum.
+    return {"reasoning_effort": "low" if off else value}
 
 
 def parse_retry_seconds(text: str) -> float | None:

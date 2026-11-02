@@ -167,16 +167,22 @@ def resume_after_approval(
     args: LedgerArgs,
     queue: ApprovalQueue,
     ticket_id: str,
+    approved: bool = True,
 ) -> str:
     """Record the human decision, then re-run every automatic check.
 
     Approval does not bypass grounding, math, or period rules: a ticket
     approved against stale or tampered evidence still fails closed.
     """
-    ticket = queue.decide(ticket_id, True)
+    ticket = queue.decide(ticket_id, approved)
     if not ticket.approved:
         state.status = "failed"
         state.failure_reason = f"denied: {ticket_id}"
+        state.log(
+            f"denied: {ticket_id}",
+            kind="denied",
+            data={"ticket_id": ticket_id, "action": ledger.name},
+        )
         return ticket_id
 
     ok, checks, reason = _validate(state, args)

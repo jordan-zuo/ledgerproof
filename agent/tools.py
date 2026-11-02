@@ -5,6 +5,7 @@ from typing import Callable
 
 from pydantic import BaseModel, Field, field_validator
 
+from agent.entities import task_entities
 from agent.states import AgentState, Evidence
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -205,7 +206,22 @@ class RetrievalTool:
         snippets = [cleaned[s:e].strip() for s, e in chosen]
         return " ... ".join(snippets)
 
+    def _missing_task_entities(self, task: str) -> list[str]:
+        haystack = " ".join([*self._documents, *self._documents.values()]).lower()
+        return [term for term in task_entities(task) if term not in haystack]
+
     def execute(self, state: AgentState, args: RetrievalArgs) -> str:
+        missing = self._missing_task_entities(state.task)
+        if missing:
+            # A named provider with no document must not be masked by generic
+            # words. "Jemena gas bill" matched the AER bill through "gas" and
+            # invited a write against the wrong vendor.
+            available = ", ".join(sorted(self._documents)) or "none"
+            return (
+                f"retrieve [{args.query}]: the task names {', '.join(missing)},"
+                f" and no document mentions them. Available documents: {available}."
+            )
+
         query_terms = _terms(args.query)
 
         def _score_doc(doc_id: str, text: str) -> float:

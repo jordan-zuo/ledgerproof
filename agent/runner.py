@@ -46,7 +46,7 @@ def run_with_model(
         return cancel is not None and cancel.is_set()
 
     last_move: str | None = None
-    last_query: str | None = None
+    last_query: tuple[str, int] | None = None
     retrieve_repeats = 0
     retrieve_nudged = False
     while True:
@@ -110,6 +110,7 @@ def run_with_model(
             "action": decision.action,
             "args": decision.args,
             "reason": decision.reason,
+            "model": getattr(client, "last_label", "") or model,
         }
         state.decisions.append(record)
         state.emit("decision", json.dumps(record, sort_keys=True), record)
@@ -182,16 +183,16 @@ def run_with_model(
         try:
             if decision.action == "retrieve":
                 args = RetrievalArgs(**decision.args)
-                key = args.query.strip().lower()
+                key = (args.query.strip().lower(), args.top_k)
                 if key == last_query:
                     retrieve_repeats += 1
                 else:
                     last_query = key
                     retrieve_repeats = 1
                     retrieve_nudged = False
-                if retrieve_repeats >= 3:
-                    # Two identical reads are harmless. A third means the
-                    # model is stuck, and a nudge is cheaper than the ceiling.
+                if retrieve_repeats >= 2:
+                    # A second identical read cannot add evidence. Nudge once
+                    # with the documents already in hand; fail on the third.
                     if retrieve_nudged:
                         state.status = "failed"
                         state.failure_reason = "repeated ineffective retrieve"
@@ -203,9 +204,16 @@ def run_with_model(
                         )
                         return state
                     retrieve_nudged = True
+                    seen = sorted({item.doc_id for item in state.evidence})
+                    detail = (
+                        f"it already returned {', '.join(seen)}"
+                        if seen
+                        else "it already returned no evidence"
+                    )
                     state.log(
-                        "not finished: you already have the results for this"
-                        " retrieve. Use that evidence and take the next step.",
+                        f"not finished: this retrieve already ran; {detail}."
+                        " Use those snippets and answer, or query a different"
+                        " document or term.",
                         kind="rejected",
                         data={"action": "retrieve", "reason": "repeated retrieve"},
                     )

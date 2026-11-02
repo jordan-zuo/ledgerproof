@@ -119,6 +119,21 @@ def test_pool_disables_a_provider_on_401_and_reports_exhaustion() -> None:
     assert "KEY_A" in message and "KEY_B" in message
 
 
+def test_pool_keeps_other_keys_on_the_same_provider_alive() -> None:
+    rejected = _Provider([_AuthError()])
+    spare = _Provider([_completion()])
+    client = _client(
+        [_spec("a1", key_env="KEY_A"), _spec("a2", key_env="KEY_B")],
+        {"a1": rejected, "a2": spare},
+        max_wait=0,
+    )
+
+    client.chat.completions.create(model="auto", messages=[])
+    assert client.last_label == "a2"
+    states = [row["state"] for row in client.snapshot()]
+    assert states == ["disabled", "ready"]
+
+
 def test_pool_parses_retry_hints() -> None:
     assert parse_retry_seconds("Please try again in 9m41.02s.") == pytest.approx(581.02)
     assert parse_retry_seconds("try again in 1h2m") == 3720.0
@@ -134,7 +149,8 @@ def test_pool_parses_retry_hints() -> None:
 
 
 def test_reasoning_shape_follows_provider() -> None:
-    assert reasoning_body("groq", "off") == {"reasoning_effort": "none"}
+    assert reasoning_body("groq", "off") == {"reasoning_effort": "low"}
+    assert reasoning_body("groq", "none") == {"reasoning_effort": "low"}
     assert reasoning_body("groq", "low") == {"reasoning_effort": "low"}
     assert reasoning_body("google", "off") == {}
     assert reasoning_body("llm7", "low") == {}

@@ -31,7 +31,36 @@ def build_client() -> Any:
     return RotatingClient(specs_for("agent"))
 
 
+def _prompt_history(history: list[str], limit: int = 16) -> list[str]:
+    """Drop duplicate retrieve lines and bound the tail the model re-reads."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    for line in history:
+        if line.startswith("retrieve ["):
+            key = line.split("]:", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(line)
+    return kept[-limit:]
+
+
+def _retrieved_docs(state: Any) -> list[str]:
+    seen: list[str] = []
+    for item in state.evidence:
+        if item.doc_id not in seen:
+            seen.append(item.doc_id)
+    return seen
+
+
 def _prompt_for(state: Any, hint: str = "", context: str = "") -> str:
+    history = _prompt_history(list(state.history))
+    docs = _retrieved_docs(state)
+    known = (
+        " Documents already retrieved: " + ", ".join(docs) + ". Do not retrieve them again."
+        if docs
+        else ""
+    )
     base = (
         "You route one step of a deterministic workflow. "
         "You MUST pick action from exactly this set: retrieve, ledger_write, "
@@ -45,6 +74,8 @@ def _prompt_for(state: Any, hint: str = "", context: str = "") -> str:
         "Post only the bill matching the task period and account. "
         "If no retrieved bill matches the asked period, do not write. "
         "Finish with the reason instead. "
+        "If retrieve says a task-named document is absent, do not substitute "
+        "another bill and do not write; finish with that reason. "
         "Use retrieved documents to move toward ledger_write or "
         "finish. "
         "retrieve: keyword search over named documents. Use plain words, "
@@ -57,10 +88,13 @@ def _prompt_for(state: Any, hint: str = "", context: str = "") -> str:
         "Do not call request_approval just because an amount is large. "
         "request_approval is only for a blocker that is not a ledger write. "
         "finish: task is fully done; for informational questions, provide the complete answer including all requested details in reason. "
+        "For informational answers, quote the exact figures or dates from the snippets in reason; never answer from memory. "
         "If a requested detail (such as customer name) was not in the snippet, retrieve with that term or doc id first before finishing. "
         "For comparative questions (such as who has the highest or lowest amount), make sure to compare all candidate bills in context before concluding. "
+        "Once the snippets contain every candidate bill, compare them and finish; do not run the same retrieve again. "
         "One retrieve with top_k up to 10 returns every matching bill; prefer that over fetching documents one by one. "
         "Never repeat a retrieve you already made; the result will not change. "
+        "If the documents are already in history, answer from them. "
         "Once a ledger write lands, finish with what you did instead of searching again. "
         "A retrieve result can list several documents separated by '||'; read every one before comparing. "
         "For solar exports, the billing-period total is the feed-in tariff row in kWh; a chart figure such as 'Solar exports: 15 kWh' is a daily average, not the total. "
@@ -72,7 +106,7 @@ def _prompt_for(state: Any, hint: str = "", context: str = "") -> str:
         "this channel accepts no tools. Reply with ONLY this JSON object: "
         '{"action": "<one of the four>", "args": {...}, "reason": "<short>"}. '
         f"Task: {state.task}. Steps used: {state.step_count}/{state.max_steps}. "
-        f"History: {list(state.history)}."
+        f"History: {history}.{known}"
     )
     if context:
         base += f" Environment: {context}"

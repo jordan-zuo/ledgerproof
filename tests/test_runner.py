@@ -163,8 +163,8 @@ def test_repeated_write_fails_fast_with_reason() -> None:
     assert state.step_count < 10
 
 
-def test_repeated_retrieve_is_allowed_and_the_run_continues() -> None:
-    """The same harmless search twice must not kill the run."""
+def test_second_identical_retrieve_is_nudged_and_the_run_can_still_finish() -> None:
+    """One repeated read cannot add evidence; the nudge must not kill the run."""
     client = _ScriptedClient(
         [
             {"action": "retrieve", "args": {"query": "recovery clause"}, "reason": "look"},
@@ -182,10 +182,12 @@ def test_repeated_retrieve_is_allowed_and_the_run_continues() -> None:
     )
     assert state.status == "done"
     assert state.step_count == 3
+    assert len(state.evidence) == 1
+    assert any(line.startswith("not finished:") for line in state.history)
 
 
-def test_three_identical_retrieves_are_nudged_then_fail() -> None:
-    """Two repeats are harmless, but a stuck loop should not burn the ceiling."""
+def test_second_identical_retrieve_is_nudged_then_a_third_fails() -> None:
+    """A stuck loop should stop after one correction, not burn the ceiling."""
     client = _ScriptedClient(
         [{"action": "retrieve", "args": {"query": "recovery clause"}, "reason": "look"}] * 4
     )
@@ -199,8 +201,31 @@ def test_three_identical_retrieves_are_nudged_then_fail() -> None:
     )
     assert state.status == "failed"
     assert "repeated ineffective retrieve" in state.failure_reason
-    assert any(line.startswith("not finished:") for line in state.history)
-    assert state.step_count == 4
+    nudge = next(line for line in state.history if line.startswith("not finished:"))
+    assert "lease-7" in nudge
+    assert state.step_count == 3
+
+
+def test_changing_top_k_is_not_a_repeated_retrieve() -> None:
+    """Widening the same query is an expansion, not a loop."""
+    client = _ScriptedClient(
+        [
+            {"action": "retrieve", "args": {"query": "recovery clause", "top_k": 1}, "reason": "look"},
+            {"action": "retrieve", "args": {"query": "recovery clause", "top_k": 4}, "reason": "widen"},
+            {"action": "finish", "args": {}, "reason": "have what is needed"},
+        ]
+    )
+    state = run_with_model(
+        AgentState(task="t", max_steps=5),
+        client,
+        "test",
+        RetrievalTool(DOCS),
+        LedgerWriteTool(),
+        ApprovalQueue(),
+    )
+    assert state.status == "done"
+    assert state.step_count == 3
+    assert len(state.evidence) == 2
 
 
 def test_finish_without_posting_is_not_done() -> None:

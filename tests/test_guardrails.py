@@ -49,6 +49,22 @@ def test_approval_resumes_and_writes() -> None:
     assert event in state.history
 
 
+def test_denial_fails_closed_without_a_row() -> None:
+    ledger, queue = LedgerWriteTool(), ApprovalQueue()
+    state = _seeded_state(50_000.0)
+    ticket_id = guarded_ledger_write(state, ledger, _args(50_000.0), queue)
+
+    event = resume_after_approval(
+        state, ledger, _args(50_000.0), queue, ticket_id, approved=False
+    )
+
+    assert event == ticket_id
+    assert state.status == "failed"
+    assert state.failure_reason == f"denied: {ticket_id}"
+    assert ledger.entries == []
+    assert f"denied: {ticket_id}" in state.history
+
+
 def test_unquoted_amount_rejected() -> None:
     ledger, queue, state = LedgerWriteTool(), ApprovalQueue(), AgentState(task="t")
     event = guarded_ledger_write(state, ledger, _args(100.0), queue)

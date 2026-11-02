@@ -22,6 +22,13 @@
       "api_key_env": "LLM7_API_KEY"
     },
     {
+      "label": "llm7-nemo-2",
+      "roles": ["agent"],
+      "provider": "llm7",
+      "model": "mistral-Nemo-Instruct-2407",
+      "api_key_env": "LLM7_API_KEY_2"
+    },
+    {
       "label": "google-flash",
       "roles": ["judge"],
       "provider": "google",
@@ -30,23 +37,23 @@
       "json_mode": true
     },
     {
-      "label": "google-flash-lite",
+      "label": "groq-120b-judge",
       "roles": ["judge"],
-      "provider": "google",
-      "model": "gemini-3.1-flash-lite",
-      "api_key_env": "GOOGLE_API_KEY",
-      "json_mode": true
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "api_key_env": "GROQ_API_KEY"
     },
     {
       "label": "llm7-nemotron",
       "roles": ["judge"],
       "provider": "llm7",
       "model": "nemotron-3-nano:30b",
-      "api_key_env": "LLM7_API_KEY"
+      "api_key_env": "LLM7_API_KEY_3",
+      "max_output_tokens": 2400
     },
     {
       "label": "groq-qwen",
-      "roles": ["agent", "judge"],
+      "roles": ["agent"],
       "provider": "groq",
       "model": "qwen/qwen3.8-27b",
       "api_key_env": "GROQ_API_KEY",

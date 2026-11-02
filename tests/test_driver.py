@@ -1,7 +1,7 @@
 import pytest
 
 from agent.driver import ModelDecision, decide
-from agent.states import AgentState
+from agent.states import AgentState, Evidence
 
 
 class _FakeMessage:
@@ -106,3 +106,20 @@ def test_prompt_carries_tool_catalog() -> None:
     assert "lease-7" in prompt
     assert "never SQL" in prompt
     assert "still call ledger_write" in prompt
+
+
+def test_prompt_collapses_repeated_retrieves_and_lists_retrieved_docs() -> None:
+    from agent.driver import _prompt_for
+
+    state = AgentState(task="Which bill has the highest solar export?")
+    state.evidence.append(Evidence(doc_id="doc-a", text="full", query="solar", snippet="snip-a"))
+    state.history.extend(
+        [
+            "retrieve [solar]: doc-a | snip-a",
+            "retrieve [solar]: doc-a | snip-a",
+            "not finished: this retrieve already ran",
+        ]
+    )
+    prompt = _prompt_for(state)
+    assert prompt.count("retrieve [solar]") == 1
+    assert "Documents already retrieved: doc-a" in prompt
