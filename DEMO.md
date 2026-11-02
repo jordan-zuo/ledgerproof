@@ -1,6 +1,6 @@
 # Two-minute demo
 
-Live instance: https://ledgerproof-d1ve.onrender.com/ui
+Live instance: https://ledgerproof-orchestrator.onrender.com/ui
 
 Two tracks. Track A is for a visitor on the hosted URL, where writes are disabled. Track B is the full flow on a local instance, where you own the token.
 

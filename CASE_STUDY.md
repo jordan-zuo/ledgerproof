@@ -72,6 +72,6 @@ A retrieval cache keyed by document and query, so repeated runs do not re-extrac
 ## Links
 
 - Repository: https://github.com/jordan-zuo/ledgerproof
-- Live read-only instance: https://ledgerproof-d1ve.onrender.com/ui
+- Live read-only instance: https://ledgerproof-orchestrator.onrender.com/ui
 - Two-minute walkthrough: [DEMO.md](DEMO.md)
 - Live judged report: [eval/report.md](eval/report.md)

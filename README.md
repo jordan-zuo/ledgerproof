@@ -18,7 +18,7 @@ python -m pytest -q
 python scripts/evaluate.py
 ```
 
-Live read-only demo: https://ledgerproof-d1ve.onrender.com/ui
+Live read-only demo: https://ledgerproof-orchestrator.onrender.com/ui
 
 [DEMO.md](DEMO.md) is the two-minute walkthrough. [CASE_STUDY.md](CASE_STUDY.md) covers the design, the evidence, and the limits.
 

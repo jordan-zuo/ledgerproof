@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ledgerproof
+    name: ledgerproof-orchestrator
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
