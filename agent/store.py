@@ -28,6 +28,30 @@ class DuplicateLedgerEntry(Exception):
         self.entry_id = entry_id
 
 
+class UnknownLedgerEntry(Exception):
+    """Raised when a reversal names a row that does not exist."""
+
+    def __init__(self, ledger_id: int) -> None:
+        super().__init__(f"unknown ledger entry: {ledger_id}")
+        self.ledger_id = ledger_id
+
+
+class AlreadyReversed(Exception):
+    """Raised when a posting already has its one reversal row."""
+
+    def __init__(self, ledger_id: int) -> None:
+        super().__init__(f"ledger entry already reversed: {ledger_id}")
+        self.ledger_id = ledger_id
+
+
+class NotReversible(Exception):
+    """Raised when a reversal row is itself offered for reversal."""
+
+    def __init__(self, ledger_id: int) -> None:
+        super().__init__(f"ledger entry is not a posting: {ledger_id}")
+        self.ledger_id = ledger_id
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -95,6 +119,11 @@ def init_db(path: Path | None = None) -> Path:
                 amount REAL NOT NULL,
                 currency TEXT NOT NULL,
                 source_doc TEXT NOT NULL,
+                bill_key TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'posting',
+                reverses_id INTEGER,
+                reason TEXT NOT NULL DEFAULT '',
+                approved_by TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS approvals (
@@ -117,6 +146,7 @@ def init_db(path: Path | None = None) -> Path:
         _migrate_runs(conn)
         _migrate_approvals(conn)
         _migrate_events(conn)
+        _migrate_ledger(conn)
         conn.executescript(
             """
             CREATE TRIGGER IF NOT EXISTS ledger_append_only_update
@@ -141,6 +171,22 @@ def init_db(path: Path | None = None) -> Path:
         except (sqlite3.IntegrityError, sqlite3.OperationalError):
             # Legacy databases may already hold a duplicate. The insert
             # guard below still enforces one entry per run.
+            pass
+        try:
+            # One reversal per posting, enforced by the database as well as
+            # the insert guard.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_one_reversal"
+                " ON ledger(reverses_id) WHERE reverses_id IS NOT NULL"
+            )
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ledger_bill_key"
+                " ON ledger(bill_key)"
+            )
+        except sqlite3.OperationalError:
             pass
         try:
             conn.execute(
@@ -202,6 +248,22 @@ def _migrate_events(conn: sqlite3.Connection) -> None:
     }
     if "data" not in existing:
         conn.execute("ALTER TABLE events ADD COLUMN data TEXT NOT NULL DEFAULT '{}'")
+
+
+def _migrate_ledger(conn: sqlite3.Connection) -> None:
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(ledger)").fetchall()
+    }
+    additions = {
+        "bill_key": "TEXT NOT NULL DEFAULT ''",
+        "kind": "TEXT NOT NULL DEFAULT 'posting'",
+        "reverses_id": "INTEGER",
+        "reason": "TEXT NOT NULL DEFAULT ''",
+        "approved_by": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in additions.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE ledger ADD COLUMN {column} {ddl}")
 
 
 def create_run(
@@ -352,20 +414,42 @@ def get_events(
 
 
 def find_ledger_posting(
-    source_doc: str, amount: float, currency: str, path: Path | None = None
+    source_doc: str,
+    amount: float,
+    currency: str,
+    path: Path | None = None,
+    bill_key: str = "",
 ) -> dict | None:
-    """Return the existing posting for this document and amount, if any.
+    """Return an outstanding posting for this bill, if any.
 
-    Identity is the source document plus amount, never the model-supplied
-    ``entry_id``: two runs can invent two different labels for one bill.
+    Identity is the canonical bill key when one could be derived, falling
+    back to the source document plus amount. The model-supplied ``entry_id``
+    is never used: two runs can invent two labels for one bill. A posting
+    that has been reversed no longer blocks a corrected re-post.
     """
     conn = connect(path)
     try:
         row = conn.execute(
-            "SELECT entry_id, run_id, amount, currency, source_doc, created_at"
-            " FROM ledger WHERE source_doc = ? AND amount = ? AND currency = ?"
-            " ORDER BY id LIMIT 1",
-            (source_doc, float(amount), currency),
+            "SELECT l.entry_id, l.run_id, l.amount, l.currency, l.source_doc,"
+            " l.bill_key, l.created_at"
+            " FROM ledger l"
+            " WHERE l.kind = 'posting'"
+            "   AND NOT EXISTS ("
+            "     SELECT 1 FROM ledger r WHERE r.kind = 'reversal'"
+            "       AND r.reverses_id = l.id"
+            "   )"
+            "   AND ("
+            "     (? <> '' AND l.bill_key = ?)"
+            "     OR (l.source_doc = ? AND l.amount = ? AND l.currency = ?)"
+            "   )"
+            " ORDER BY l.id LIMIT 1",
+            (
+                bill_key,
+                bill_key,
+                source_doc,
+                float(amount),
+                currency,
+            ),
         ).fetchone()
         return dict(row) if row else None
     finally:
@@ -379,19 +463,29 @@ def insert_ledger_entry(
     currency: str,
     source_doc: str,
     path: Path | None = None,
+    *,
+    bill_key: str = "",
 ) -> None:
     conn = connect(path)
     try:
         cur = conn.execute(
             "INSERT INTO ledger (entry_id, run_id, amount, currency, source_doc,"
-            " created_at)"
-            " SELECT ?, ?, ?, ?, ?, ?"
+            " bill_key, kind, created_at)"
+            " SELECT ?, ?, ?, ?, ?, ?, 'posting', ?"
             " WHERE NOT EXISTS ("
             "   SELECT 1 FROM ledger WHERE run_id = ? AND entry_id = ?"
             " )"
             " AND NOT EXISTS ("
-            "   SELECT 1 FROM ledger WHERE source_doc = ? AND amount = ?"
-            "     AND currency = ?"
+            "   SELECT 1 FROM ledger l"
+            "   WHERE l.kind = 'posting'"
+            "     AND NOT EXISTS ("
+            "       SELECT 1 FROM ledger r WHERE r.kind = 'reversal'"
+            "         AND r.reverses_id = l.id"
+            "     )"
+            "     AND ("
+            "       (? <> '' AND l.bill_key = ?)"
+            "       OR (l.source_doc = ? AND l.amount = ? AND l.currency = ?)"
+            "     )"
             " )",
             (
                 entry_id,
@@ -399,9 +493,12 @@ def insert_ledger_entry(
                 float(amount),
                 currency,
                 source_doc,
+                bill_key,
                 _now(),
                 run_id,
                 entry_id,
+                bill_key,
+                bill_key,
                 source_doc,
                 float(amount),
                 currency,
@@ -414,14 +511,88 @@ def insert_ledger_entry(
         conn.close()
 
 
+def reverse_ledger_entry(
+    ledger_id: int,
+    reason: str,
+    approved_by: str,
+    path: Path | None = None,
+) -> dict:
+    """Append a signed negative row. The original posting is never touched.
+
+    The reversal carries the original run, document, currency, and canonical
+    bill key, so it is auditable without a join on mutable state. Reversing
+    twice is refused by the insert guard and by a unique index.
+    """
+    cleaned_reason = reason.strip()
+    cleaned_by = approved_by.strip()
+    if not cleaned_reason or not cleaned_by:
+        raise ValueError("a reversal needs a reason and an approver")
+
+    conn = connect(path)
+    try:
+        try:
+            cur = conn.execute(
+                "INSERT INTO ledger (entry_id, run_id, amount, currency,"
+                " source_doc, bill_key, kind, reverses_id, reason, approved_by,"
+                " created_at)"
+                " SELECT ?, l.run_id, -l.amount, l.currency, l.source_doc,"
+                " l.bill_key, 'reversal', l.id, ?, ?, ?"
+                " FROM ledger l"
+                " WHERE l.id = ? AND l.kind = 'posting'"
+                "   AND NOT EXISTS ("
+                "     SELECT 1 FROM ledger r WHERE r.kind = 'reversal'"
+                "       AND r.reverses_id = l.id"
+                "   )",
+                (
+                    f"reversal-{ledger_id}",
+                    cleaned_reason,
+                    cleaned_by,
+                    _now(),
+                    ledger_id,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            raise AlreadyReversed(ledger_id) from None
+        if cur.rowcount == 0:
+            row = conn.execute(
+                "SELECT kind FROM ledger WHERE id = ?", (ledger_id,)
+            ).fetchone()
+            if row is None:
+                raise UnknownLedgerEntry(ledger_id)
+            if row["kind"] != "posting":
+                raise NotReversible(ledger_id)
+            raise AlreadyReversed(ledger_id)
+        row = conn.execute(
+            "SELECT id, entry_id, run_id, amount, currency, source_doc,"
+            " bill_key, kind, reverses_id, reason, approved_by, created_at"
+            " FROM ledger WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
 def list_ledger(path: Path | None = None) -> list[dict]:
     conn = connect(path)
     try:
         rows = conn.execute(
-            "SELECT entry_id, run_id, amount, currency, source_doc"
-            " FROM ledger ORDER BY id"
+            "SELECT l.id, l.entry_id, l.run_id, l.amount, l.currency,"
+            " l.source_doc, l.bill_key, l.kind, l.reverses_id, l.reason,"
+            " l.approved_by, l.created_at,"
+            " EXISTS("
+            "   SELECT 1 FROM ledger r WHERE r.kind = 'reversal'"
+            "     AND r.reverses_id = l.id"
+            " ) AS reversed"
+            " FROM ledger l ORDER BY l.id"
         ).fetchall()
-        return [dict(r) for r in rows]
+        entries = []
+        for row in rows:
+            item = dict(row)
+            item["reversed"] = bool(item["reversed"])
+            entries.append(item)
+        return entries
     finally:
         conn.close()
 

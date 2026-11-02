@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from agent.approvals import ApprovalQueue
 from agent.driver import decide
+from agent.guardrails import duplicate_is_target
 from agent.ledger_flow import guarded_ledger_write, resume_after_approval
 from agent.router import route
 from agent.states import AgentState
@@ -232,9 +233,11 @@ def run_with_model(
                 args = LedgerArgs(**decision.args)
                 out = guarded_ledger_write(state, ledger, args, queue)
                 if out.startswith("rejected:"):
-                    # A confirmed duplicate is a settled outcome: there is
-                    # nothing left to post, so finishing is correct.
-                    if "already posted" in out:
+                    # A duplicate can settle the task only when the bill that
+                    # was already posted is the one the task asked for.
+                    if "already posted" in out and duplicate_is_target(
+                        state.task, args, state.evidence
+                    ):
                         state.settled = True
                 elif state.status == "awaiting_approval":
                     if not auto_approve:
@@ -250,6 +253,7 @@ def run_with_model(
                             "amount": args.amount,
                             "currency": args.currency,
                             "source_doc": args.source_doc,
+                            "bill_key": args.bill_key or "",
                         },
                     )
                     state.posted = True

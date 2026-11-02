@@ -9,6 +9,7 @@ The deterministic suite in scripts/evaluate.py stays offline and unchanged.
 Usage (repo root):
     python scripts/judged_evaluate.py --dry-run
     python scripts/judged_evaluate.py --skip-judge
+    python scripts/judged_evaluate.py --skip-judge --replay
     python scripts/judged_evaluate.py --case agl-due-post
     python scripts/judged_evaluate.py
 """
@@ -168,10 +169,14 @@ def hard_checks(case: dict, record: dict) -> dict:
     add("forbidden_amounts", not bad_amounts, f"forbidden amounts in ledger: {bad_amounts}")
 
     history = record.get("history") or []
-    gated = any(line.startswith("gated: ") for line in history) or record.get("status") == "awaiting_approval"
+    tickets = record.get("tickets") or []
+    # Tickets are derived from the full history before it is tail-limited for
+    # the judge payload, so a gate near the start cannot be truncated away.
+    gated = bool(tickets) or record.get("status") == "awaiting_approval"
+    if not gated:
+        gated = any(line.startswith("gated: ") for line in history)
     add("gate", gated == bool(gold.get("gated", False)), f"gated={gated} expected={bool(gold.get('gated', False))}")
 
-    tickets = record.get("tickets") or []
     add("tickets", len(tickets) == int(gold.get("tickets", 0)), f"{len(tickets)} tickets")
 
     if gold.get("ticket_approved"):
@@ -677,11 +682,67 @@ def _select_cases(cases: list[dict], wanted: list[str]) -> list[dict]:
     return [by_id[case_id] for case_id in wanted]
 
 
+def replay_results(
+    cases: list[dict],
+    results_path: Path = RESULTS_PATH,
+    require_full_suite: bool = True,
+) -> int:
+    """Re-apply the hard checks to committed trajectories without model calls."""
+    try:
+        data = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"replay error: cannot read {results_path}: {exc}")
+        return 2
+    raw = data.get("cases")
+    if not isinstance(raw, list):
+        print(f"replay error: {results_path} has no cases list")
+        return 2
+    records = {record.get("id"): record for record in raw}
+    wanted = {case["id"] for case in cases}
+    failures = 0
+    missing = sorted(wanted - set(records))
+    if missing:
+        print(f"replay error: results are missing cases: {', '.join(missing)}")
+        failures += len(missing)
+    extra = sorted(set(records) - wanted)
+    if require_full_suite and extra:
+        print(f"replay error: results contain cases outside the suite: {', '.join(extra)}")
+        failures += len(extra)
+
+    passed = 0
+    for case in cases:
+        record = records.get(case["id"])
+        if record is None:
+            continue
+        result = hard_checks(case, record)
+        failed = [check["name"] for check in result["checks"] if not check["ok"]]
+        stored = bool((record.get("hard") or {}).get("passed"))
+        detail = "" if result["passed"] else f" failed={', '.join(failed)}"
+        if stored != result["passed"]:
+            detail += f" stored={'pass' if stored else 'fail'}"
+        print(f"replay {case['id']}: {'pass' if result['passed'] else 'fail'}{detail}")
+        if result["passed"]:
+            passed += 1
+        else:
+            failures += 1
+
+    print(f"replay hard: {passed}/{len(cases)} cases")
+    if failures:
+        print(f"replay failed: {failures} problem(s)")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the live judged evaluation suite.")
     parser.add_argument("--case", action="append", default=[], help="run only this case id (repeatable)")
     parser.add_argument("--skip-judge", action="store_true", help="run agent cases and hard checks only")
     parser.add_argument("--dry-run", action="store_true", help="validate the suite and config without calling a model")
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="re-apply hard checks to eval/judged_results.json without calling a model",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -690,6 +751,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"suite error: {exc}")
         return 2
+
+    if args.replay:
+        return replay_results(cases, RESULTS_PATH, require_full_suite=not args.case)
 
     try:
         from dotenv import load_dotenv

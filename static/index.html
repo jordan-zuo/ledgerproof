@@ -510,6 +510,31 @@
       color: var(--text-muted);
     }
 
+    .status-badge.posted {
+      background: var(--accent-sage-bg);
+      color: var(--accent-sage);
+    }
+
+    .status-badge.corrected {
+      background: var(--accent-camel-bg);
+      color: var(--accent-camel);
+    }
+
+    .status-badge.reversed {
+      background: #EFECE7;
+      color: var(--text-muted);
+    }
+
+    .status-badge.duplicate,
+    .status-badge.conflict {
+      background: var(--accent-rust-bg);
+      color: var(--accent-rust);
+    }
+
+    .status-badge.conflict {
+      animation: pulse 2s infinite;
+    }
+
     /* Recent Runs */
     .run-list-container {
       background: #FFFFFF;
@@ -788,6 +813,47 @@
       color: var(--text-main);
     }
 
+    .bill-key {
+      margin-top: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+
+    .bill-docs {
+      margin-top: 3px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+
+    table.trail-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    table.trail-table th {
+      padding: 8px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-card);
+    }
+
+    table.trail-table td {
+      padding: 10px;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border-subtle);
+      vertical-align: top;
+    }
+
+    table.trail-table tr:last-child td {
+      border-bottom: none;
+    }
+
     /* Corpus & Document Modal */
     .modal-overlay {
       display: none;
@@ -953,6 +1019,14 @@
     }
 
     @media (max-width: 980px) {
+      .navbar {
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .nav-links {
+        flex-wrap: wrap;
+        gap: 16px;
+      }
       .bento-grid {
         grid-template-columns: 1fr;
         grid-template-rows: auto;
@@ -981,8 +1055,9 @@
         <span class="brand-name">Enterprise Agent Orchestrator</span>
       </a>
       <ul class="nav-links">
-        <li><a href="#orchestrator" class="active">Reconcile</a></li>
+        <li><a href="#orchestrator" class="active">Run Task</a></li>
         <li><a href="#timeline">Run Timeline</a></li>
+        <li><a href="#reconciliation">Reconciliation</a></li>
         <li><a href="#ledger">Financial Ledger</a></li>
         <li><a href="javascript:void(0)" onclick="openCorpusModal()">Document Catalog</a></li>
       </ul>
@@ -1196,6 +1271,42 @@
       </div>
     </div>
 
+    <!-- Bill Reconciliation -->
+    <div class="section-head" id="reconciliation">
+      <div>
+        <h2 class="section-title">Bill Reconciliation</h2>
+        <div style="font-size: 13.5px; color: var(--text-muted);">One row per bill. Outstanding is what remains after signed corrections.</div>
+      </div>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <span id="recon-summary" style="font-size: 12.5px; color: var(--text-muted);"></span>
+        <button class="pill-btn light" onclick="refreshReconciliation()">
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    <div class="ledger-container">
+      <table class="ledger-table">
+        <thead>
+          <tr>
+            <th>Bill</th>
+            <th>Outstanding</th>
+            <th>Net</th>
+            <th>Status</th>
+            <th>Trail</th>
+            <th>Last Run</th>
+          </tr>
+        </thead>
+        <tbody id="reconciliation-body">
+          <tr>
+            <td colspan="6" style="text-align: center; padding: 32px; color: var(--text-muted);">
+              Loading reconciliation...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- Financial Ledger Table -->
     <div class="section-head" id="ledger">
       <div>
@@ -1220,6 +1331,7 @@
             <th>Amount</th>
             <th>Currency</th>
             <th>Run ID</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody id="ledger-body">
@@ -1248,6 +1360,19 @@
     </div>
   </div>
 
+  <!-- Reversal Trail Modal -->
+  <div class="modal-overlay" id="trail-modal">
+    <div class="modal-window">
+      <div class="modal-header">
+        <h3 class="modal-title" id="trail-title">Bill trail</h3>
+        <button class="pill-btn light" style="padding: 6px 12px; font-size: 12px;" onclick="closeTrailModal()">
+          Close
+        </button>
+      </div>
+      <div class="modal-body" id="trail-modal-body"></div>
+    </div>
+  </div>
+
   <script>
     // State management
     let activeRunId = null;
@@ -1255,6 +1380,7 @@
     let sseSource = null;
     let sseRunId = null;
     let renderedSteps = 0;
+    let reconciliationBills = [];
 
     function setTask(text) {
       document.getElementById('task-input').value = text;
@@ -1806,32 +1932,185 @@
     }
 
     async function refreshLedger() {
+      refreshReconciliation();
       const tbody = document.getElementById('ledger-body');
       try {
         const res = await fetch('/ledger');
         const data = await res.json();
         if (!data.entries || data.entries.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; padding: 24px; color: var(--text-muted);">No entries posted to ledger yet.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px; color: var(--text-muted);">No entries posted to ledger yet.</td></tr>`;
           return;
         }
 
         tbody.innerHTML = '';
         data.entries.forEach(entry => {
           const tr = document.createElement('tr');
-          const repeat = entry.duplicate
-            ? `<span class="evidence-chip" style="background: var(--accent-rust-bg); color: var(--accent-rust); margin-left: 6px;">repeat posting</span>`
-            : '';
+          const isReversal = entry.kind === 'reversal';
+          const chips = [];
+          let note = '';
+          if (isReversal) {
+            chips.push(`<span class="evidence-chip" style="background: var(--accent-rust-bg); color: var(--accent-rust); margin-left: 6px;">reversal</span>`);
+            note = `<div style="font-size: 11.5px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(entry.reason)} signed ${escapeHtml(entry.approved_by)}</div>`;
+          } else if (entry.reversed) {
+            chips.push(`<span class="evidence-chip" style="background: var(--accent-rust-bg); color: var(--accent-rust); margin-left: 6px;">reversed</span>`);
+          } else if (entry.duplicate) {
+            chips.push(`<span class="evidence-chip" style="background: var(--accent-rust-bg); color: var(--accent-rust); margin-left: 6px;">repeat posting</span>`);
+          }
+          const amount = Number(entry.amount);
+          const amountStyle = amount < 0 ? 'color: var(--accent-rust);' : '';
+          let action = '';
+          if (isReversal) {
+            action = `<span style="font-size: 11.5px; color: var(--text-muted);">corrects #${entry.reverses_id}</span>`;
+          } else if (!entry.reversed) {
+            action = `<button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="reverseEntry(${entry.id})">Reverse</button>`;
+          }
           tr.innerHTML = `
-            <td><span class="doc-pill">${escapeHtml(entry.source_doc)}</span>${repeat}</td>
-            <td class="amount-cell">${Number(entry.amount).toFixed(2)}</td>
+            <td><span class="doc-pill">${escapeHtml(entry.source_doc)}</span>${chips.join('')}${note}</td>
+            <td class="amount-cell" style="${amountStyle}">${amount.toFixed(2)}</td>
             <td style="font-weight: 600;">${escapeHtml(entry.currency)}</td>
             <td><code style="font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);">${escapeHtml(entry.run_id)}</code></td>
+            <td>${action}</td>
           `;
           tbody.appendChild(tr);
         });
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--accent-rust);">Failed to load ledger: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--accent-rust);">Failed to load ledger: ${e.message}</td></tr>`;
       }
+    }
+
+    async function reverseEntry(ledgerId) {
+      const reason = prompt('Why is this posting being reversed?');
+      if (reason === null) return;
+      if (reason.trim().length < 3) {
+        notify('A reversal needs a reason of at least 3 characters.', 'bad');
+        return;
+      }
+      const approver = prompt('Who is approving this reversal?', 'web-ui');
+      if (approver === null) return;
+      if (!approver.trim()) {
+        notify('A reversal needs an approver.', 'bad');
+        return;
+      }
+      try {
+        const res = await fetch(`/ledger/${ledgerId}/reverse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reason: reason.trim(),
+            approved_by: approver.trim(),
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        notify('Reversal posted. The original row stays in place.', 'ok');
+        refreshLedger();
+        loadRuns();
+      } catch (e) {
+        notify('Reversal failed: ' + e.message, 'bad');
+      }
+    }
+
+    function renderReconciliationSummary(summary) {
+      const el = document.getElementById('recon-summary');
+      if (!el) return;
+      const counts = summary.by_status || {};
+      const review = (counts.conflict || 0) + (counts.duplicate || 0);
+      const money = Object.entries(summary.outstanding || {})
+        .map(([currency, amount]) => `${Number(amount).toFixed(2)} ${currency}`)
+        .join(' + ');
+      el.innerText = `${summary.bills || 0} bills, ${review} to review${money ? `, ${money} outstanding` : ''}`;
+    }
+
+    async function refreshReconciliation() {
+      const tbody = document.getElementById('reconciliation-body');
+      if (!tbody) return;
+      try {
+        const res = await fetch('/reconciliation');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        reconciliationBills = data.bills || [];
+        renderReconciliationSummary(data.summary || {});
+        if (reconciliationBills.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px; color: var(--text-muted);">No bills to reconcile yet.</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = '';
+        reconciliationBills.forEach((bill, index) => {
+          const currency = escapeHtml(bill.currency);
+          const outstanding = Number(bill.outstanding_amount);
+          const net = Number(bill.net_amount);
+          const docs = bill.documents && bill.documents.length > 1
+            ? `<div class="bill-docs">${bill.documents.length} document ids</div>`
+            : '';
+          const review = bill.conflict
+            ? `<span class="evidence-chip" style="background: var(--accent-rust-bg); color: var(--accent-rust); margin-left: 6px;">needs review</span>`
+            : '';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>
+              <span class="doc-pill">${escapeHtml(bill.source_doc)}</span>${review}
+              <div class="bill-key">${escapeHtml(bill.bill_key)}</div>
+              ${docs}
+            </td>
+            <td class="amount-cell">${outstanding.toFixed(2)} ${currency}</td>
+            <td class="amount-cell" style="${net < 0 ? 'color: var(--accent-rust);' : ''}">${net.toFixed(2)} ${currency}</td>
+            <td><span class="status-badge ${escapeHtml(bill.status)}">${escapeHtml(bill.status)}</span></td>
+            <td><button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="openTrailModal(${index})">${bill.trail.length} ${bill.trail.length === 1 ? 'entry' : 'entries'}</button></td>
+            <td><code style="font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);">${escapeHtml(bill.last_run)}</code></td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--accent-rust);">Failed to load reconciliation: ${escapeHtml(e.message)}</td></tr>`;
+      }
+    }
+
+    function openTrailModal(index) {
+      const bill = reconciliationBills[index];
+      if (!bill) return;
+      const modal = document.getElementById('trail-modal');
+      const body = document.getElementById('trail-modal-body');
+      const currency = escapeHtml(bill.currency);
+      document.getElementById('trail-title').innerText = bill.source_doc;
+      const rows = bill.trail.map(step => {
+        const amount = Number(step.amount);
+        const note = step.kind === 'reversal'
+          ? `${escapeHtml(step.reason)} signed ${escapeHtml(step.approved_by)}`
+          : (step.reversed ? 'reversed' : 'outstanding');
+        const amountStyle = amount < 0 ? ' style="color: var(--accent-rust);"' : '';
+        return `<tr>
+          <td>#${step.ledger_id}</td>
+          <td>${escapeHtml(step.kind)}</td>
+          <td class="amount-cell"${amountStyle}>${amount.toFixed(2)} ${escapeHtml(step.currency)}</td>
+          <td>${note}</td>
+          <td>
+            <code style="font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);">${escapeHtml(step.run_id)}</code>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">${escapeHtml(step.at)}</div>
+          </td>
+        </tr>`;
+      }).join('');
+      body.innerHTML = `
+        <div style="margin-bottom: 12px;">
+          <span class="doc-pill">${escapeHtml(bill.bill_key)}</span>
+          ${bill.documents.map(doc => `<span class="doc-pill" style="margin-left: 6px;">${escapeHtml(doc)}</span>`).join('')}
+        </div>
+        <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+          Outstanding ${Number(bill.outstanding_amount).toFixed(2)} ${currency}
+          &nbsp;|&nbsp; Net ${Number(bill.net_amount).toFixed(2)} ${currency}
+        </div>
+        <table class="trail-table">
+          <thead>
+            <tr><th>Row</th><th>Kind</th><th>Amount</th><th>Note</th><th>Run / Time</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+      modal.classList.add('open');
+    }
+
+    function closeTrailModal() {
+      document.getElementById('trail-modal').classList.remove('open');
     }
 
     async function openCorpusModal() {

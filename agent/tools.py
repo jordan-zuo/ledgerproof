@@ -63,6 +63,9 @@ class LedgerArgs(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(default="AUD", min_length=1)
     source_doc: str = Field(min_length=1)
+    # Derived from the cited bill, never from the model. Excluded from dumps
+    # so a proposal cannot smuggle its own identity past the guard.
+    bill_key: str | None = Field(default=None, exclude=True)
 
 
 class RetrievalTool:
@@ -281,7 +284,8 @@ class LedgerWriteTool:
         "amounts must be positive numbers (credits are unsupported); "
         "entry_id and source_doc are required; "
         "amounts over 10000 pause for human approval; "
-        "a document already posted cannot be posted again"
+        "a bill already posted cannot be posted again, even under another"
+        " document id"
     )
 
     def __init__(self, posted: Callable[[LedgerArgs], dict | None] | None = None) -> None:
@@ -294,6 +298,8 @@ class LedgerWriteTool:
         # A run can propose the same bill twice before the service has a
         # chance to reload it from SQLite. One bill, one posting, always.
         for entry in self.entries:
+            if args.bill_key and entry.bill_key == args.bill_key:
+                return {"entry_id": entry.entry_id, "run_id": "current-run"}
             if entry.source_doc == args.source_doc and abs(entry.amount - args.amount) <= 0.01:
                 return {"entry_id": entry.entry_id, "run_id": "current-run"}
         if self._posted is None:

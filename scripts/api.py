@@ -26,9 +26,11 @@ sys.path.insert(0, str(ROOT))
 
 from agent import store  # noqa: E402
 from agent.approvals import ApprovalQueue  # noqa: E402
+from agent.bill_identity import identify_bill  # noqa: E402
 from agent.bill_math import verify_ledger_math  # noqa: E402
 from agent.guardrails import assess_due_amount, assess_grounding  # noqa: E402
 from agent.periods import period_compatible  # noqa: E402
+from agent.reconciliation import reconcile, summarize  # noqa: E402
 from agent.runner import run_with_model  # noqa: E402
 from agent.states import AgentState, Evidence  # noqa: E402
 from agent.tools import LedgerArgs, LedgerWriteTool, RetrievalTool  # noqa: E402
@@ -52,6 +54,11 @@ class DecideRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     confirm: bool = False
+
+
+class ReverseRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    approved_by: str = Field(min_length=1, max_length=120)
 
 
 def _client() -> Any:
@@ -97,6 +104,7 @@ def _persist_side_effect(
             float(data["amount"]),
             str(data["currency"]),
             str(data["source_doc"]),
+            bill_key=str(data.get("bill_key") or ""),
         )
     elif kind == "gated":
         wanted = data.get("ticket_id")
@@ -149,7 +157,10 @@ def _execute_run(
     retrieval = RetrievalTool(_docs())
     ledger = LedgerWriteTool(
         posted=lambda args: store.find_ledger_posting(
-            args.source_doc, args.amount, args.currency
+            args.source_doc,
+            args.amount,
+            args.currency,
+            bill_key=args.bill_key or "",
         )
     )
     queue = ApprovalQueue()
@@ -244,16 +255,79 @@ def favicon() -> Response:
 def ledger() -> dict[str, Any]:
     store.init_db()
     entries = store.list_ledger()
-    # Postings made before the one-bill-one-row guard can still repeat the
-    # same document. They are immutable, so mark them instead of hiding them.
+    # Outstanding postings made before the one-bill-one-row guard can still
+    # repeat the same bill. They are immutable, so mark them, not hide them.
     counts: dict[tuple[str, float, str], int] = {}
     for item in entries:
-        key = (item["source_doc"], float(item["amount"]), item["currency"])
+        if item["kind"] != "posting" or item["reversed"]:
+            continue
+        key = (
+            item["bill_key"] or item["source_doc"],
+            float(item["amount"]),
+            item["currency"],
+        )
         counts[key] = counts.get(key, 0) + 1
     for item in entries:
-        key = (item["source_doc"], float(item["amount"]), item["currency"])
-        item["duplicate"] = counts[key] > 1
+        key = (
+            item["bill_key"] or item["source_doc"],
+            float(item["amount"]),
+            item["currency"],
+        )
+        item["duplicate"] = item["kind"] == "posting" and counts.get(key, 0) > 1
     return {"entries": entries}
+
+
+@app.get("/reconciliation")
+def reconciliation() -> dict[str, Any]:
+    """One row per canonical bill, with its reversal trail.
+
+    Grouping happens over the append-only rows, so a bill corrected under a
+    different document id still lands in one place.
+    """
+    store.init_db()
+    bills = reconcile(store.list_ledger())
+    return {"bills": bills, "summary": summarize(bills)}
+
+
+@app.post("/ledger/{ledger_id}/reverse")
+def reverse_entry(ledger_id: int, req: ReverseRequest) -> dict[str, Any]:
+    """Append a signed correction. The human action is the approval.
+
+    Nothing is edited or deleted: the original row stays, and a new negative
+    row names it, the reason, and who signed off.
+    """
+    store.init_db()
+    try:
+        entry = store.reverse_ledger_entry(ledger_id, req.reason, req.approved_by)
+    except store.UnknownLedgerEntry:
+        raise HTTPException(
+            status_code=404, detail="unknown ledger entry"
+        ) from None
+    except store.AlreadyReversed:
+        raise HTTPException(
+            status_code=409, detail="ledger entry is already reversed"
+        ) from None
+    except store.NotReversible:
+        raise HTTPException(
+            status_code=409, detail="a reversal entry cannot be reversed"
+        ) from None
+    store.append_event(
+        entry["run_id"],
+        "ledger_reversal",
+        f"reversal: {entry['source_doc']} {entry['amount']:.2f}"
+        f" {entry['currency']} by {req.approved_by} ({req.reason})",
+        {
+            "entry_id": entry["entry_id"],
+            "reverses_id": entry["reverses_id"],
+            "amount": entry["amount"],
+            "currency": entry["currency"],
+            "source_doc": entry["source_doc"],
+            "bill_key": entry["bill_key"],
+            "reason": req.reason,
+            "approved_by": req.approved_by,
+        },
+    )
+    return {"entry": entry}
 
 
 @app.get("/storage")
@@ -556,16 +630,33 @@ def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
     if not period_ok:
         raise HTTPException(status_code=422, detail=period_reason)
 
+    identity = identify_bill(args.source_doc, cited)
+    expected = str(meta.get("bill_key") or "")
+    if expected and identity.key != expected:
+        raise HTTPException(
+            status_code=422,
+            detail="bill identity changed since the ticket was raised",
+        )
+    args.bill_key = identity.key
+
     ticket = _gate(ticket_id, True, req.decided_by, req.note)
     receipt = f"ledger_write: {args.source_doc} {args.amount:.2f} {args.currency}"
     try:
         store.insert_ledger_entry(
-            run_id, args.entry_id, args.amount, args.currency, args.source_doc
+            run_id,
+            args.entry_id,
+            args.amount,
+            args.currency,
+            args.source_doc,
+            bill_key=args.bill_key,
         )
     except store.DuplicateLedgerEntry:
         raise HTTPException(
             status_code=409,
-            detail=f"ledger entry already exists for run: {args.source_doc}",
+            detail=(
+                f"already posted: {args.source_doc} is the same bill as an"
+                " existing ledger row"
+            ),
         )
     store.append_event(
         run_id,
@@ -587,6 +678,7 @@ def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
             "amount": args.amount,
             "currency": args.currency,
             "source_doc": args.source_doc,
+            "bill_key": args.bill_key,
             "ticket_id": ticket_id,
         },
     )

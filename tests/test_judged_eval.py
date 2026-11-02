@@ -16,10 +16,12 @@ from scripts.judge import (
     preflight_judge,
 )
 from scripts.judged_evaluate import (
+    RESULTS_PATH,
     aggregate,
     hard_checks,
     load_suite,
     render_report,
+    replay_results,
     run_live_case,
 )
 
@@ -268,6 +270,42 @@ def test_ticket_denied_requires_no_row_landed() -> None:
     )
     failed = {check["name"] for check in hard_checks(denied_case, leaked)["checks"] if not check["ok"]}
     assert "ticket_denied" in failed
+
+
+def test_gate_check_survives_a_truncated_history() -> None:
+    """The stored history is tail-limited, so gate truth comes from tickets."""
+    case = _case("origin-gated-post")
+    ticket = {"ticket_id": "t-gate", "approved": True, "denied": False}
+    record = _record(
+        [{"entry_id": "j-1", "amount": 13376.47, "source_doc": "origin-standing-bill-modified-alexcarter"}],
+        tickets=[ticket],
+    )
+    record["history"] = [
+        f"retrieve [{index}]: agl-better-bills-sample-bill-necf | Amount due $63.70"
+        for index in range(12)
+    ]
+
+    assert not any(line.startswith("gated: ") for line in record["history"])
+    result = hard_checks(case, record)
+    assert result["passed"] is True
+    assert {check["name"] for check in result["checks"] if not check["ok"]} == set()
+
+
+def test_replay_rechecks_the_committed_trajectories() -> None:
+    """CI replays the recorded run offline, so no API keys are needed."""
+    assert replay_results(load_suite()["cases"], RESULTS_PATH) == 0
+
+
+def test_replay_rejects_a_trajectory_that_no_longer_passes(tmp_path: Path) -> None:
+    """A stored pass cannot hide a trajectory that fails the current checks."""
+    data = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    agl = next(case for case in data["cases"] if case["id"] == "agl-due-post")
+    agl["ledger"][0]["amount"] = 79.87
+    assert agl["hard"]["passed"] is True
+
+    target = tmp_path / "judged_results.json"
+    target.write_text(json.dumps(data), encoding="utf-8")
+    assert replay_results(load_suite()["cases"], target) == 1
 
 
 def test_judge_prompt_embeds_rubric_gold_and_hard_checks() -> None:

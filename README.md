@@ -2,7 +2,7 @@
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, request-id idempotency, evidence-backed ledger writes, human approvals, duplicate-posting guard, an archive-first ledger reset, and a free-model pool with rotation. 121 tests, deterministic eval 14/14.
+Status: working demo. Live run streaming, run list with reload reattach and cancel, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, an archive-first ledger reset, and a free-model pool with rotation. 147 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
 
 ## Run
 
@@ -10,6 +10,14 @@ Status: working demo. Live run streaming, run list with reload reattach and canc
 pip install -r requirements.txt
 python -m pytest -q
 ```
+
+## Ledger guarantees
+
+One bill is one identity. The key is derived from the cited text, never from the model: account number plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name cannot be posted twice.
+
+Corrections are append-only. `POST /ledger/{id}/reverse` appends a negative row linked to the original, with a required reason and approver; the original stays in place. A reversed posting no longer blocks a corrected re-post, while a double reversal or a reversal of a reversal returns 409.
+
+The reconciliation view reads the rows back per bill. `GET /reconciliation` groups by canonical key, reports the outstanding and net amounts, flags conflicting outstanding amounts and duplicate postings, and keeps the full posting and reversal trail. The UI shows one row per bill with a trail modal, so a correction filed under a second document id still appears as one bill.
 
 ## Live judged eval
 
@@ -22,6 +30,8 @@ python scripts/judged_evaluate.py
 ```
 
 Hard checks stay authoritative: status, ledger rows and amounts, forbidden documents and amounts, approval gates, tickets, duplicate rows, required answer terms, whether the final answer is grounded in a retrieved snippet, and how many distinct bills the model tried to write. A blocked substitution still counts as an attempted write, even when no row lands. Any failed check forces a fail regardless of the judge. Three calibration probes run first; a judge that cannot reject a wrong amount or a skipped gate aborts the suite instead of publishing a verdict. A full run makes 12 judge calls (3 calibration, 9 cases). Judge pass is reported over scored cases only, with unavailable cases counted separately. Results land in `eval/judged_results.json` and `eval/report.md`.
+
+CI runs pytest, the deterministic eval, and `python scripts/judged_evaluate.py --skip-judge --replay` on every push. Replay re-applies the hard checks to the committed trajectories for all nine cases in `eval/judged_results.json`: no API keys, no model calls, and a stored pass that no longer passes is reported as a mismatch. The authoritative public suite remains the periodic live run, since a full pass spends real agent and judge quota on the free tiers.
 
 ### Benchmarks
 

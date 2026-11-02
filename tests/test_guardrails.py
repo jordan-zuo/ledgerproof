@@ -1,7 +1,7 @@
 import pytest
 
 from agent.approvals import ApprovalQueue
-from agent.guardrails import assess_ledger
+from agent.guardrails import assess_ledger, duplicate_is_target
 from agent.ledger_flow import guarded_ledger_write, resume_after_approval
 from agent.states import AgentState, Evidence
 from agent.tools import LedgerArgs, LedgerWriteTool
@@ -113,6 +113,28 @@ def test_unknown_ticket_raises() -> None:
     queue = ApprovalQueue()
     with pytest.raises(KeyError, match="unknown approval ticket"):
         queue.decide("t-9999", True)
+
+
+def test_duplicate_settles_only_the_named_bill() -> None:
+    """An already-posted AER bill must not settle an AGL request."""
+    task = "Post the AGL amount due."
+    agl = Evidence(doc_id="agl-better-bills-sample-bill-necf", text="Amount due 63.70")
+    aer = Evidence(doc_id="aer-example-bill", text="Amount due 79.87")
+    assert duplicate_is_target(
+        task, LedgerArgs(entry_id="j-1", amount=63.70, source_doc=agl.doc_id), [agl]
+    )
+    assert not duplicate_is_target(
+        task, LedgerArgs(entry_id="j-2", amount=79.87, source_doc=aer.doc_id), [agl, aer]
+    )
+
+
+def test_unnamed_task_needs_one_candidate_document() -> None:
+    """With no named bill, only a single-document run can call it settled."""
+    first = Evidence(doc_id="doc-a", text="Amount due 10.00")
+    second = Evidence(doc_id="doc-b", text="Amount due 20.00")
+    args = LedgerArgs(entry_id="j-1", amount=10.00, source_doc="doc-a")
+    assert duplicate_is_target("post the bill", args, [first])
+    assert not duplicate_is_target("post the bill", args, [first, second])
 
 
 def test_threshold_boundary() -> None:

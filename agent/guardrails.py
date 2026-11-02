@@ -61,6 +61,21 @@ def assess_grounding(args: LedgerArgs, evidence: list[Evidence]) -> tuple[bool, 
     return True, "grounded"
 
 
+def duplicate_is_target(task: str, args: LedgerArgs, evidence: list[Evidence]) -> bool:
+    """Whether a duplicate write names the bill the task asked for.
+
+    A named bill must appear in the cited document. A task that names no
+    bill only settles when the run saw one candidate document, because a
+    duplicate of some other bill says nothing about the requested one.
+    """
+    terms = task_entities(task)
+    if terms:
+        cited = source_evidence(args.source_doc, evidence)
+        haystack = " ".join([args.source_doc, *(item.text for item in cited)]).lower()
+        return all(term in haystack for term in terms)
+    return len({item.doc_id for item in evidence}) == 1
+
+
 def assess_vendor(
     task: str, args: LedgerArgs, evidence: list[Evidence]
 ) -> tuple[bool, str]:

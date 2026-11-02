@@ -306,6 +306,38 @@ def test_finish_after_an_already_posted_bill_is_done() -> None:
     assert ledger.entries == []
 
 
+def test_duplicate_of_another_bill_does_not_settle_the_task() -> None:
+    """A posted row for a different bill is not the posting the task asked for."""
+    client = _ScriptedClient(
+        [
+            {
+                "action": "ledger_write",
+                "args": {"entry_id": "sam", "amount": 10.0, "source_doc": "d"},
+                "reason": "post it",
+            },
+        ]
+    )
+    ledger = LedgerWriteTool(posted=lambda args: {"entry_id": "x", "run_id": "r-1"})
+    state = run_with_model(
+        AgentState(
+            task="post the bill",
+            max_steps=6,
+            evidence=[
+                Evidence(doc_id="d", text="total 10.00"),
+                Evidence(doc_id="e", text="total 20.00"),
+            ],
+        ),
+        client,
+        "test",
+        RetrievalTool(DOCS),
+        ledger,
+        ApprovalQueue(),
+    )
+    assert state.status == "failed"
+    assert state.settled is False
+    assert ledger.entries == []
+
+
 def test_empty_finish_answer_is_rejected_once() -> None:
     """An answer task cannot finish with a blank reason."""
     client = _ScriptedClient(

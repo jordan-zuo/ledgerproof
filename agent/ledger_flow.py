@@ -1,4 +1,5 @@
 from agent.approvals import ApprovalQueue
+from agent.bill_identity import BillIdentity, identify_bill
 from agent.bill_math import verify_ledger_math
 from agent.guardrails import (
     APPROVAL_THRESHOLD,
@@ -15,6 +16,12 @@ from agent.tools import LedgerArgs, LedgerWriteTool
 
 def _text(items: list[Evidence]) -> str:
     return "\n".join(item.text for item in items)
+
+
+def _identity(state: AgentState, args: LedgerArgs) -> BillIdentity:
+    """Derive the bill's identity from its own cited text, never the model."""
+    cited = source_evidence(args.source_doc, state.evidence)
+    return identify_bill(args.source_doc, _text(cited))
 
 
 def _validate(
@@ -68,12 +75,24 @@ def _validate(
 
 
 def _packet(
-    state: AgentState, args: LedgerArgs, verdict_reason: str, checks: dict[str, str]
+    state: AgentState,
+    args: LedgerArgs,
+    verdict_reason: str,
+    checks: dict[str, str],
+    identity: BillIdentity,
 ) -> dict:
     cited = source_evidence(args.source_doc, state.evidence)
     return {
         "task": state.task,
         "proposed": args.model_dump(),
+        "identity": {
+            "bill_key": identity.key,
+            "basis": identity.basis,
+            "account": identity.account,
+            "period_start": identity.period_start,
+            "period_end": identity.period_end,
+            "issue_date": identity.issue_date,
+        },
         "threshold": APPROVAL_THRESHOLD,
         "rule": verdict_reason,
         "checks": checks,
@@ -107,6 +126,9 @@ def guarded_ledger_write(
         )
         return f"rejected: {reason}"
 
+    identity = _identity(state, args)
+    args.bill_key = identity.key
+
     existing = ledger.already_posted(args)
     if existing is not None:
         # One bill, one posting. The model's entry_id is a label, not an
@@ -123,6 +145,7 @@ def guarded_ledger_write(
                 "action": "ledger_write",
                 "reason": reason,
                 "existing": existing,
+                "bill_key": args.bill_key,
             },
         )
         return f"rejected: {reason}"
@@ -131,7 +154,7 @@ def guarded_ledger_write(
     if not verdict.needs_approval:
         return ledger.execute(state, args)
 
-    packet = _packet(state, args, verdict.reason, checks)
+    packet = _packet(state, args, verdict.reason, checks, identity)
     ticket_id = queue.submit(
         action=ledger.name,
         detail=verdict.reason,
@@ -140,6 +163,7 @@ def guarded_ledger_write(
             "amount": args.amount,
             "currency": args.currency,
             "source_doc": args.source_doc,
+            "bill_key": args.bill_key,
         },
         evidence=packet,
     )
@@ -156,6 +180,7 @@ def guarded_ledger_write(
             "threshold": APPROVAL_THRESHOLD,
             "entry_id": args.entry_id,
             "source_doc": args.source_doc,
+            "bill_key": args.bill_key,
         },
     )
     return ticket_id
@@ -201,6 +226,28 @@ def resume_after_approval(
         )
         return state.failure_reason
 
+    identity = _identity(state, args)
+    expected = str((ticket.meta or {}).get("bill_key") or "")
+    if expected and identity.key != expected:
+        # The human approved one bill. If the evidence now describes another,
+        # the approval does not carry over.
+        state.status = "failed"
+        state.failure_reason = "post-approval check failed: bill identity changed"
+        state.log(
+            "rejected: post-approval bill identity changed from "
+            f"{expected} to {identity.key}",
+            kind="rejected",
+            data={
+                "action": "ledger_write",
+                "reason": "bill identity changed",
+                "phase": "post-approval",
+                "expected": expected,
+                "actual": identity.key,
+            },
+        )
+        return state.failure_reason
+    args.bill_key = identity.key
+
     event = ledger.execute(state, args)
     state.log(
         event,
@@ -210,6 +257,7 @@ def resume_after_approval(
             "amount": args.amount,
             "currency": args.currency,
             "source_doc": args.source_doc,
+            "bill_key": args.bill_key,
         },
     )
     state.status = "done"
