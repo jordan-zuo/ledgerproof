@@ -535,6 +535,11 @@
       animation: pulse 2s infinite;
     }
 
+    body.read-only .write-control,
+    body.access-pending .write-control {
+      display: none !important;
+    }
+
     /* Recent Runs */
     .run-list-container {
       background: #FFFFFF;
@@ -1046,7 +1051,7 @@
     }
   </style>
 </head>
-<body>
+<body class="access-pending">
   <div class="container">
     <!-- Navigation -->
     <header class="navbar">
@@ -1062,6 +1067,10 @@
         <li><a href="javascript:void(0)" onclick="openCorpusModal()">Document Catalog</a></li>
       </ul>
       <div class="nav-status">
+        <span id="access-badge" class="status-badge reversed" style="display: none;"></span>
+        <button id="owner-btn" class="pill-btn light" style="display: none;" onclick="ownerLogin()">
+          Owner login
+        </button>
         <button class="pill-btn light" onclick="refreshLedger()">
           Refresh
         </button>
@@ -1113,7 +1122,7 @@
           </div>
         </div>
 
-        <div class="task-controls">
+        <div class="task-controls write-control">
           <div class="step-ceiling-selector">
             <span>Step Ceiling:</span>
             <select id="step-ceiling" class="step-select">
@@ -1239,7 +1248,7 @@
             <div id="step-counter" style="font-size: 13px; font-weight: 600; color: var(--text-muted);">
               Steps: 0/6
             </div>
-            <button id="cancel-run-btn" class="pill-btn danger" style="display: none; padding: 5px 12px; font-size: 12px;" onclick="cancelActiveRun()">
+            <button id="cancel-run-btn" class="pill-btn danger write-control" style="display: none; padding: 5px 12px; font-size: 12px;" onclick="cancelActiveRun()">
               Cancel run
             </button>
           </div>
@@ -1314,7 +1323,7 @@
         <div style="font-size: 13.5px; color: var(--text-muted);">Recorded transactions and supporting documents.</div>
       </div>
       <div style="display: flex; gap: 8px; align-items: center;">
-        <button class="pill-btn danger" id="reset-ledger-btn" onclick="resetLedger()">
+        <button class="pill-btn danger write-control" id="reset-ledger-btn" onclick="resetLedger()">
           Clear ledger
         </button>
         <button class="pill-btn light" onclick="refreshLedger()">
@@ -1373,6 +1382,35 @@
     </div>
   </div>
 
+  <!-- Owner Token Modal -->
+  <div class="modal-overlay" id="owner-modal">
+    <div class="modal-window" style="max-width: 460px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Owner access</h3>
+        <button class="pill-btn light" style="padding: 6px 12px; font-size: 12px;" onclick="closeOwnerModal()">
+          Close
+        </button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+          Paste the APP_TOKEN configured on this server. It stays in this tab only and is sent only on write requests.
+        </p>
+        <input
+          id="owner-token-input"
+          type="password"
+          autocomplete="off"
+          placeholder="APP_TOKEN"
+          style="width: 100%; padding: 10px 12px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13px;"
+          onkeydown="if (event.key === 'Enter') saveOwnerToken()"
+        />
+        <div style="display: flex; gap: 8px; margin-top: 14px;">
+          <button class="pill-btn" onclick="saveOwnerToken()">Unlock writes</button>
+          <button class="pill-btn light" onclick="closeOwnerModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     // State management
     let activeRunId = null;
@@ -1381,6 +1419,117 @@
     let sseRunId = null;
     let renderedSteps = 0;
     let reconciliationBills = [];
+    let access = { mode: 'open', read_only: false, auth_required: false };
+    let apiToken = sessionStorage.getItem('apiToken') || '';
+
+    function canWrite() {
+      if (access.mode === 'read_only') return false;
+      if (access.auth_required && !apiToken) return false;
+      return true;
+    }
+
+    function writeLockedMessage() {
+      if (access.mode === 'read_only') {
+        return 'Read-only demo: writes are disabled on this instance.';
+      }
+      if (access.auth_required && !apiToken) {
+        return 'Owner token required: use Owner login to enable writes.';
+      }
+      return 'Writes are disabled.';
+    }
+
+    function applyAccess() {
+      const writable = canWrite();
+      document.body.classList.remove('access-pending');
+      document.body.classList.toggle('read-only', !writable);
+
+      const badge = document.getElementById('access-badge');
+      if (badge) {
+        if (access.mode === 'read_only') {
+          badge.innerText = 'Read-only demo';
+          badge.style.display = 'inline-flex';
+        } else if (access.mode === 'owner') {
+          badge.innerText = writable ? 'Owner session' : 'Read-only demo';
+          badge.style.display = 'inline-flex';
+        } else if (access.mode === 'token') {
+          badge.innerText = writable ? 'Owner session' : 'Token required';
+          badge.style.display = 'inline-flex';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+
+      const ownerBtn = document.getElementById('owner-btn');
+      if (ownerBtn) {
+        ownerBtn.style.display = access.auth_required ? 'inline-flex' : 'none';
+        ownerBtn.innerText = apiToken ? 'Sign out' : 'Owner login';
+      }
+
+      checkPendingApprovals();
+      refreshLedger();
+    }
+
+    async function loadAccess() {
+      try {
+        const res = await fetch('/config');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        access = await res.json();
+      } catch (e) {
+        access = { mode: 'open', read_only: false, auth_required: false };
+      }
+      applyAccess();
+    }
+
+    function ownerLogin() {
+      if (apiToken) {
+        apiToken = '';
+        sessionStorage.removeItem('apiToken');
+        notify('Owner session cleared.', 'ok');
+        applyAccess();
+        return;
+      }
+      const input = document.getElementById('owner-token-input');
+      input.value = '';
+      document.getElementById('owner-modal').classList.add('open');
+      input.focus();
+    }
+
+    function closeOwnerModal() {
+      document.getElementById('owner-modal').classList.remove('open');
+    }
+
+    function saveOwnerToken() {
+      const input = document.getElementById('owner-token-input');
+      const value = input.value.trim();
+      if (!value) {
+        notify('Paste the server token first.', 'bad');
+        return;
+      }
+      apiToken = value;
+      sessionStorage.setItem('apiToken', apiToken);
+      closeOwnerModal();
+      notify('Owner token stored for this tab.', 'ok');
+      applyAccess();
+    }
+
+    function writeHeaders(extra = {}) {
+      const headers = { ...extra };
+      if (apiToken) headers['X-API-Token'] = apiToken;
+      return headers;
+    }
+
+    async function authedFetch(url, options = {}) {
+      const res = await fetch(url, {
+        ...options,
+        headers: writeHeaders(options.headers || {}),
+      });
+      if (res.status === 401) {
+        apiToken = '';
+        sessionStorage.removeItem('apiToken');
+        applyAccess();
+      }
+      return res;
+    }
 
     function setTask(text) {
       document.getElementById('task-input').value = text;
@@ -1462,7 +1611,7 @@
       document.getElementById('step-counter').innerText = `Steps: 0/${maxSteps}`;
 
       try {
-        const res = await fetch('/run', {
+        const res = await authedFetch('/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task, max_steps: maxSteps, request_id: newRequestId() })
@@ -1711,7 +1860,7 @@
       if (!activeRunId) return;
       const runId = activeRunId;
       try {
-        const res = await fetch(`/runs/${runId}/cancel`, { method: 'POST' });
+        const res = await authedFetch(`/runs/${runId}/cancel`, { method: 'POST' });
         const data = await res.json();
         if (!res.ok) {
           notify(data.detail || `Cancel failed (${res.status})`, 'bad');
@@ -1780,6 +1929,7 @@
         ` : ''}
         <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-light); margin-top: 8px;">Evidence</div>
         ${citationHtml}
+        ${canWrite() ? `
         <div class="ticket-actions">
           <button class="pill-btn danger" style="padding: 6px 12px; font-size: 12px;" onclick="decideTicket('${escapeHtml(ticket.ticket_id)}', false, ${Number(ticket.display_no) || 0})">
             Deny
@@ -1787,7 +1937,10 @@
           <button class="pill-btn camel" style="padding: 6px 12px; font-size: 12px;" onclick="decideTicket('${escapeHtml(ticket.ticket_id)}', true, ${Number(ticket.display_no) || 0})">
             Approve
           </button>
-        </div>
+        </div>` : `
+        <div style="font-size: 12px; color: var(--text-muted); margin-top: 10px;">
+          ${escapeHtml(writeLockedMessage())}
+        </div>`}
       `;
     }
 
@@ -1844,7 +1997,7 @@
     async function decideTicket(ticketId, approved, displayNo = 0) {
       const label = displayNo ? `Ticket #${displayNo}` : 'Ticket';
       try {
-        const res = await fetch(`/approvals/${ticketId}/decide`, {
+        const res = await authedFetch(`/approvals/${ticketId}/decide`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved, decided_by: 'web-ui' })
@@ -1901,7 +2054,7 @@
       disarmReset();
       btn.disabled = true;
       try {
-        const res = await fetch('/admin/reset', {
+        const res = await authedFetch('/admin/reset', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ confirm: true })
@@ -1961,8 +2114,10 @@
           let action = '';
           if (isReversal) {
             action = `<span style="font-size: 11.5px; color: var(--text-muted);">corrects #${entry.reverses_id}</span>`;
-          } else if (!entry.reversed) {
+          } else if (!entry.reversed && canWrite()) {
             action = `<button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="reverseEntry(${entry.id})">Reverse</button>`;
+          } else if (!entry.reversed) {
+            action = `<span style="font-size: 11.5px; color: var(--text-muted);">read-only</span>`;
           }
           tr.innerHTML = `
             <td><span class="doc-pill">${escapeHtml(entry.source_doc)}</span>${chips.join('')}${note}</td>
@@ -1992,7 +2147,7 @@
         return;
       }
       try {
-        const res = await fetch(`/ledger/${ledgerId}/reverse`, {
+        const res = await authedFetch(`/ledger/${ledgerId}/reverse`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2155,8 +2310,7 @@
     // Auto-load ledger and approvals on page load, then reattach to a live run
     // so a reload resumes the same timeline.
     window.addEventListener('DOMContentLoaded', async () => {
-      refreshLedger();
-      checkPendingApprovals();
+      await loadAccess();
       const runs = await loadRuns();
       const live = runs.find(r => r.status === 'running' || r.status === 'awaiting_approval');
       if (live) attachRun(live.run_id);

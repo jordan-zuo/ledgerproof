@@ -12,11 +12,12 @@ import sqlite3
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import anyio
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,7 @@ STATIC_DIR = ROOT / "static"
 sys.path.insert(0, str(ROOT))
 
 from agent import store  # noqa: E402
+from agent.access import access_state, require_write  # noqa: E402
 from agent.approvals import ApprovalQueue  # noqa: E402
 from agent.bill_identity import identify_bill  # noqa: E402
 from agent.bill_math import verify_ledger_math  # noqa: E402
@@ -35,7 +37,16 @@ from agent.runner import run_with_model  # noqa: E402
 from agent.states import AgentState, Evidence  # noqa: E402
 from agent.tools import LedgerArgs, LedgerWriteTool, RetrievalTool  # noqa: E402
 
-app = FastAPI(title="enterprise-agent-orchestrator")
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> Any:
+    """Read .env once when a real server starts, not when tests import the app."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    yield
+
+
+app = FastAPI(title="enterprise-agent-orchestrator", lifespan=lifespan)
 
 TEST_CLIENT: Any = None
 
@@ -217,6 +228,12 @@ def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/config")
+def config() -> dict[str, object]:
+    """Tell the UI whether writes are open, token-gated, or read-only."""
+    return access_state()
+
+
 @app.get("/")
 def index(request: Request) -> Any:
     index_file = STATIC_DIR / "index.html"
@@ -289,7 +306,7 @@ def reconciliation() -> dict[str, Any]:
     return {"bills": bills, "summary": summarize(bills)}
 
 
-@app.post("/ledger/{ledger_id}/reverse")
+@app.post("/ledger/{ledger_id}/reverse", dependencies=[Depends(require_write)])
 def reverse_entry(ledger_id: int, req: ReverseRequest) -> dict[str, Any]:
     """Append a signed correction. The human action is the approval.
 
@@ -341,7 +358,7 @@ def storage() -> dict[str, Any]:
     }
 
 
-@app.post("/admin/reset")
+@app.post("/admin/reset", dependencies=[Depends(require_write)])
 def reset(req: ResetRequest) -> dict[str, Any]:
     """Archive the current database and start empty.
 
@@ -374,7 +391,7 @@ def _run_receipt(run: dict[str, Any], replayed: bool) -> dict[str, Any]:
     }
 
 
-@app.post("/run", status_code=202)
+@app.post("/run", status_code=202, dependencies=[Depends(require_write)])
 def create_run(req: RunRequest) -> dict[str, Any]:
     store.init_db()
     if req.request_id:
@@ -416,7 +433,7 @@ def get_run(run_id: str) -> dict[str, Any]:
     return {"run": run, "events": store.get_events(run_id)}
 
 
-@app.post("/runs/{run_id}/cancel")
+@app.post("/runs/{run_id}/cancel", dependencies=[Depends(require_write)])
 def cancel_run(run_id: str) -> dict[str, Any]:
     """Stop a live run. Cooperative: checked between steps, never mid-write."""
     store.init_db()
@@ -524,7 +541,7 @@ def _gate(
     return ticket
 
 
-@app.post("/approvals/{ticket_id}/decide")
+@app.post("/approvals/{ticket_id}/decide", dependencies=[Depends(require_write)])
 def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
     store.init_db()
     ticket = store.get_approval(ticket_id)

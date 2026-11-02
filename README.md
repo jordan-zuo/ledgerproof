@@ -2,7 +2,7 @@
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, an archive-first ledger reset, and a free-model pool with rotation. 147 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
+Status: working demo. Live run streaming, run list with reload reattach and cancel, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, an archive-first ledger reset, token-gated writes with a read-only demo mode, and a free-model pool with rotation. 150 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
 
 ## Run
 
@@ -10,6 +10,29 @@ Status: working demo. Live run streaming, run list with reload reattach and canc
 pip install -r requirements.txt
 python -m pytest -q
 ```
+
+## Access control
+
+Writes are open by default so local development stays frictionless. Two environment variables change that:
+
+| Setting | Effect |
+| --- | --- |
+| neither set | Open. Anyone who can reach the port can run tasks and change the ledger. |
+| `APP_TOKEN` set | Every write needs an `X-API-Token` header. Reads stay open. |
+| `READ_ONLY_DEMO=1` | Every write returns 403. Reads stay open. |
+| both set | Visitors are read-only, and the owner can still write with the token. |
+
+The UI reads `GET /config`, hides Run, Approve, Reverse, Cancel, and Clear while writes are locked, and shows the access state in the navbar. When a token is configured, Owner login stores it in this tab's sessionStorage and sends it only on write requests.
+
+A public portfolio deployment:
+
+```powershell
+$env:APP_TOKEN = "<long random string>"
+$env:READ_ONLY_DEMO = "1"
+python -m uvicorn scripts.api:app --port 8000
+```
+
+Anyone can browse the ledger, reconciliation, and run history; only a request carrying the token can start or change anything. Keep the token out of URLs and out of git. Binding the server to `127.0.0.1`, the default, keeps it off the network entirely. Use `--host 0.0.0.0` or a tunnel only when you mean to serve it.
 
 ## Ledger guarantees
 
