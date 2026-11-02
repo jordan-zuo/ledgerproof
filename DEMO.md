@@ -10,7 +10,7 @@ The public instance runs `READ_ONLY_DEMO=1`. Every write returns 403, so Run, Ap
 
 | Time | Where | What to show |
 | --- | --- | --- |
-| 0:00 | `/ui` | The navbar badge says Read-only demo. The hero states the claim: deterministic steps, evidence, and a human gate. |
+| 0:00 | `/ui` | The hosted instance is read-only, so write controls stay hidden. The hero states the claim: deterministic steps, evidence, and a human gate. |
 | 0:10 | Financial Ledger | One row per bill, not per document. Open a trail to show the posting, its evidence snippet, and any reversal. |
 | 0:30 | Bill Reconciliation | Status per bill: posted, corrected, reversed, conflict, duplicate. Point at outstanding versus net. |
 | 0:50 | Period Close & Export | Months sorted newest first, with bills, outstanding, and review exceptions. Open the ledger CSV in a new tab; show the period basis column. |

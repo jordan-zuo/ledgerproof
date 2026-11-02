@@ -58,8 +58,9 @@
     /* Top Navigation */
     header.navbar {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      justify-content: space-between;
+      gap: 16px 24px;
       margin-bottom: 32px;
       padding: 8px 4px;
     }
@@ -68,6 +69,7 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      flex: 0 0 auto;
       text-decoration: none;
       color: var(--text-main);
     }
@@ -90,16 +92,22 @@
       font-size: 21px;
       font-weight: 800;
       letter-spacing: -0.5px;
+      white-space: nowrap;
     }
 
     .nav-links {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 28px;
+      justify-content: center;
+      gap: 10px 24px;
+      flex: 1 1 auto;
       list-style: none;
     }
 
     .nav-links a {
+      display: inline-block;
+      white-space: nowrap;
       color: var(--text-muted);
       text-decoration: none;
       font-weight: 600;
@@ -115,6 +123,8 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      flex: 0 0 auto;
+      margin-left: auto;
     }
 
     .pill-btn {
@@ -1066,14 +1076,20 @@
       to   { opacity: 1; transform: translateY(0); }
     }
 
+    @media (max-width: 1180px) {
+      .nav-links {
+        flex-basis: 100%;
+        order: 3;
+        justify-content: flex-start;
+      }
+    }
+
     @media (max-width: 980px) {
       .navbar {
-        flex-wrap: wrap;
         gap: 12px;
       }
       .nav-links {
-        flex-wrap: wrap;
-        gap: 16px;
+        gap: 10px 18px;
       }
       .bento-grid {
         grid-template-columns: 1fr;
@@ -1099,7 +1115,7 @@
     <!-- Navigation -->
     <header class="navbar">
       <a href="#" class="brand">
-        <div class="brand-mark">EA</div>
+        <div class="brand-mark">LP</div>
         <span class="brand-name">Ledgerproof</span>
       </a>
       <ul class="nav-links">
@@ -1111,7 +1127,6 @@
         <li><a href="javascript:void(0)" onclick="openCorpusModal()">Document Catalog</a></li>
       </ul>
       <div class="nav-status">
-        <span id="access-badge" class="status-badge reversed" style="display: none;"></span>
         <button id="owner-btn" class="pill-btn light" style="display: none;" onclick="ownerLogin()">
           Owner login
         </button>
@@ -1552,22 +1567,6 @@
       const writable = canWrite();
       document.body.classList.remove('access-pending');
       document.body.classList.toggle('read-only', !writable);
-
-      const badge = document.getElementById('access-badge');
-      if (badge) {
-        if (access.mode === 'read_only') {
-          badge.innerText = 'Read-only demo';
-          badge.style.display = 'inline-flex';
-        } else if (access.mode === 'owner') {
-          badge.innerText = writable ? 'Owner session' : 'Read-only demo';
-          badge.style.display = 'inline-flex';
-        } else if (access.mode === 'token') {
-          badge.innerText = writable ? 'Owner session' : 'Token required';
-          badge.style.display = 'inline-flex';
-        } else {
-          badge.style.display = 'none';
-        }
-      }
 
       const ownerBtn = document.getElementById('owner-btn');
       if (ownerBtn) {
