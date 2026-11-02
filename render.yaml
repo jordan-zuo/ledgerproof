@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: enterprise-agent-orchestrator
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py --host 0.0.0.0 --no-open
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: READ_ONLY_DEMO
+        value: "1"
+      - key: APP_INBOX_WATCH
+        value: "0"
+      - key: APP_DB
+        value: demo/ledger.db
+      - key: APP_TOKEN
+        sync: false

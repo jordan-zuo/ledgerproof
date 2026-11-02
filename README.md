@@ -2,14 +2,50 @@
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, and a free-model pool with rotation. 171 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
+Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, a free-model pool with rotation, and a one-command launcher that runs on a native Python host without Docker. 174 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
 
 ## Run
 
 ```powershell
 pip install -r requirements.txt
-python -m pytest -q
+python run.py
 ```
+
+`run.py` loads `.env`, creates the database, prints the access mode, and opens `http://127.0.0.1:8000/ui`. `python run.py --check` prints an install report and exits without a server: Python version, database path, corpus size, UI presence, access mode, and how many model specs have keys. `--read-only` refuses writes, `--port` and `--host` set the bind, and `--reload` restarts on edits.
+
+```powershell
+python -m pytest -q
+python scripts/evaluate.py
+```
+
+[DEMO.md](DEMO.md) is the two-minute walkthrough. [CASE_STUDY.md](CASE_STUDY.md) covers the design, the evidence, and the limits.
+
+## Deploy without Docker
+
+The app is one Python process over SQLite, so it runs on a native Python runtime. There is no Dockerfile, no container build, and no image registry. `render.yaml` is a Render blueprint for its Python runtime, and `Procfile` is the same start command for Railway, Heroku, or any platform that can run `python run.py`.
+
+[Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/enterprise-agent-orchestrator)
+
+The blueprint sets `READ_ONLY_DEMO=1`, disables the inbox watcher, and opens the committed snapshot at `demo/ledger.db`. Visitors see the real ledger, reconciliation, periods, runs, and exports without a model key; only a request carrying `APP_TOKEN` can write, and that variable can stay empty for a pure read-only demo.
+
+| Setting | What it does |
+| --- | --- |
+| `PORT` | Injected by the platform. `run.py` reads it when `--port` is absent. |
+| `APP_DB` | Database path. The blueprint uses `demo/ledger.db`, a snapshot of real runs on the three sample bills. |
+| `READ_ONLY_DEMO=1` | Refuses every write with 403 while reads stay open. |
+| `APP_TOKEN` | The owner's write token. Set it in the host dashboard, never in git. |
+| `APP_INBOX_WATCH=0` | Stops the inbox poller on a host with no inbox to watch. |
+| `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. Only needed for owner-run tasks, not for browsing. |
+
+The free Render plan has an ephemeral filesystem and sleeps when idle. The committed snapshot is restored on every deploy or restart, so the read-only demo always comes back with the same rows, and the first visit after a pause can take 30 to 60 seconds. For durable owner writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk.
+
+Before a public deploy, run the check that matters:
+
+```powershell
+python run.py --check
+```
+
+Then confirm the hosted instance reports `read_only` at `/config` and returns 403 on `POST /run` without the token. HTTPS, the public hostname, and restart supervision belong to the platform; the app binds `0.0.0.0` only because the platform forwards to it.
 
 ## Run queue
 
