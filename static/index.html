@@ -1127,9 +1127,6 @@
         <li><a href="javascript:void(0)" onclick="openCorpusModal()">Document Catalog</a></li>
       </ul>
       <div class="nav-status">
-        <button id="owner-btn" class="pill-btn light" style="display: none;" onclick="ownerLogin()">
-          Owner login
-        </button>
         <button class="pill-btn light" onclick="refreshLedger()">
           Refresh
         </button>
@@ -1507,35 +1504,6 @@
     </div>
   </div>
 
-  <!-- Owner Token Modal -->
-  <div class="modal-overlay" id="owner-modal">
-    <div class="modal-window" style="max-width: 460px;">
-      <div class="modal-header">
-        <h3 class="modal-title">Owner access</h3>
-        <button class="pill-btn light" style="padding: 6px 12px; font-size: 12px;" onclick="closeOwnerModal()">
-          Close
-        </button>
-      </div>
-      <div class="modal-body">
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-          Paste the APP_TOKEN configured on this server. It stays in this tab only and is sent only on write requests.
-        </p>
-        <input
-          id="owner-token-input"
-          type="password"
-          autocomplete="off"
-          placeholder="APP_TOKEN"
-          style="width: 100%; padding: 10px 12px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13px;"
-          onkeydown="if (event.key === 'Enter') saveOwnerToken()"
-        />
-        <div style="display: flex; gap: 8px; margin-top: 14px;">
-          <button class="pill-btn" onclick="saveOwnerToken()">Unlock writes</button>
-          <button class="pill-btn light" onclick="closeOwnerModal()">Cancel</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <script>
     // State management
     let activeRunId = null;
@@ -1544,21 +1512,15 @@
     let sseRunId = null;
     let renderedSteps = 0;
     let reconciliationBills = [];
-    let access = { mode: 'open', read_only: false, auth_required: false };
-    let apiToken = sessionStorage.getItem('apiToken') || '';
+    let access = { mode: 'open', read_only: false };
 
     function canWrite() {
-      if (access.mode === 'read_only') return false;
-      if (access.auth_required && !apiToken) return false;
-      return true;
+      return access.mode !== 'read_only';
     }
 
     function writeLockedMessage() {
       if (access.mode === 'read_only') {
         return 'Read-only demo: writes are disabled on this instance.';
-      }
-      if (access.auth_required && !apiToken) {
-        return 'Owner token required: use Owner login to enable writes.';
       }
       return 'Writes are disabled.';
     }
@@ -1567,12 +1529,6 @@
       const writable = canWrite();
       document.body.classList.remove('access-pending');
       document.body.classList.toggle('read-only', !writable);
-
-      const ownerBtn = document.getElementById('owner-btn');
-      if (ownerBtn) {
-        ownerBtn.style.display = access.auth_required ? 'inline-flex' : 'none';
-        ownerBtn.innerText = apiToken ? 'Sign out' : 'Owner login';
-      }
 
       checkPendingApprovals();
       refreshLedger();
@@ -1584,7 +1540,7 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         access = await res.json();
       } catch (e) {
-        access = { mode: 'open', read_only: false, auth_required: false };
+        access = { mode: 'open', read_only: false };
       }
       applyXeroDefaults();
       applyAccess();
@@ -1604,57 +1560,6 @@
           el.value = defaults[key];
         }
       });
-    }
-
-    function ownerLogin() {
-      if (apiToken) {
-        apiToken = '';
-        sessionStorage.removeItem('apiToken');
-        notify('Owner session cleared.', 'ok');
-        applyAccess();
-        return;
-      }
-      const input = document.getElementById('owner-token-input');
-      input.value = '';
-      document.getElementById('owner-modal').classList.add('open');
-      input.focus();
-    }
-
-    function closeOwnerModal() {
-      document.getElementById('owner-modal').classList.remove('open');
-    }
-
-    function saveOwnerToken() {
-      const input = document.getElementById('owner-token-input');
-      const value = input.value.trim();
-      if (!value) {
-        notify('Paste the server token first.', 'bad');
-        return;
-      }
-      apiToken = value;
-      sessionStorage.setItem('apiToken', apiToken);
-      closeOwnerModal();
-      notify('Owner token stored for this tab.', 'ok');
-      applyAccess();
-    }
-
-    function writeHeaders(extra = {}) {
-      const headers = { ...extra };
-      if (apiToken) headers['X-API-Token'] = apiToken;
-      return headers;
-    }
-
-    async function authedFetch(url, options = {}) {
-      const res = await fetch(url, {
-        ...options,
-        headers: writeHeaders(options.headers || {}),
-      });
-      if (res.status === 401) {
-        apiToken = '';
-        sessionStorage.removeItem('apiToken');
-        applyAccess();
-      }
-      return res;
     }
 
     function setTask(text) {
@@ -1737,7 +1642,7 @@
       document.getElementById('step-counter').innerText = `Steps: 0/${maxSteps}`;
 
       try {
-        const res = await authedFetch('/run', {
+        const res = await fetch('/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task, max_steps: maxSteps, request_id: newRequestId() })
@@ -1986,7 +1891,7 @@
       if (!activeRunId) return;
       const runId = activeRunId;
       try {
-        const res = await authedFetch(`/runs/${runId}/cancel`, { method: 'POST' });
+        const res = await fetch(`/runs/${runId}/cancel`, { method: 'POST' });
         const data = await res.json();
         if (!res.ok) {
           notify(data.detail || `Cancel failed (${res.status})`, 'bad');
@@ -2123,7 +2028,7 @@
     async function decideTicket(ticketId, approved, displayNo = 0) {
       const label = displayNo ? `Ticket #${displayNo}` : 'Ticket';
       try {
-        const res = await authedFetch(`/approvals/${ticketId}/decide`, {
+        const res = await fetch(`/approvals/${ticketId}/decide`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved, decided_by: 'web-ui' })
@@ -2180,7 +2085,7 @@
       disarmReset();
       btn.disabled = true;
       try {
-        const res = await authedFetch('/admin/reset', {
+        const res = await fetch('/admin/reset', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ confirm: true })
@@ -2288,7 +2193,7 @@
         return;
       }
       try {
-        const res = await authedFetch(`/periods/${encodeURIComponent(period)}/close`, {
+        const res = await fetch(`/periods/${encodeURIComponent(period)}/close`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ note: note.trim(), decided_by: operator.trim() }),
@@ -2323,7 +2228,7 @@
         return;
       }
       try {
-        const res = await authedFetch(`/periods/${encodeURIComponent(period)}/reopen`, {
+        const res = await fetch(`/periods/${encodeURIComponent(period)}/reopen`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ note: note.trim(), decided_by: operator.trim() }),
@@ -2443,7 +2348,7 @@
         return;
       }
       try {
-        const res = await authedFetch(`/ledger/${ledgerId}/reverse`, {
+        const res = await fetch(`/ledger/${ledgerId}/reverse`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2624,7 +2529,7 @@
         btn.innerText = 'Ingesting...';
       }
       try {
-        const res = await authedFetch('/ingest', { method: 'POST' });
+        const res = await fetch('/ingest', { method: 'POST' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Ingest failed');
         const changed = data.added.length + data.updated.length;

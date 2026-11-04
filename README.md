@@ -18,7 +18,7 @@ python -m pytest -q
 python scripts/evaluate.py
 ```
 
-Live read-only demo: https://ledgerproof-orchestrator.onrender.com/ui
+Live public demo: https://ledgerproof-orchestrator.onrender.com/ui
 
 [DEMO.md](DEMO.md) is the two-minute walkthrough. [CASE_STUDY.md](CASE_STUDY.md) covers the design, the evidence, and the limits.
 
@@ -28,18 +28,18 @@ The app is one Python process over SQLite, so it runs on a native Python runtime
 
 [Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/ledgerproof)
 
-The blueprint sets `READ_ONLY_DEMO=1`, disables the inbox watcher, and opens the committed snapshot at `demo/ledger.db`. Visitors see the real ledger, reconciliation, periods, runs, and exports without a model key; only a request carrying `APP_TOKEN` can write, and that variable can stay empty for a pure read-only demo.
+The blueprint runs one Python process with the default ephemeral SQLite database and the inbox watcher on, so a fresh instance ingests the three sample PDFs at startup. The hosted instance allows public writes: anyone can run a task, approve the gate, and close a period. Data resets when the instance restarts or redeploys.
 
 | Setting | What it does |
 | --- | --- |
 | `PORT` | Injected by the platform. `run.py` reads it when `--port` is absent. |
-| `APP_DB` | Database path. The blueprint uses `demo/ledger.db`, a snapshot of real runs on the three sample bills. |
-| `READ_ONLY_DEMO=1` | Refuses every write with 403 while reads stay open. |
-| `APP_TOKEN` | The owner's write token. Set it in the host dashboard, never in git. |
-| `APP_INBOX_WATCH=0` | Stops the inbox poller on a host with no inbox to watch. |
-| `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. Only needed for owner-run tasks, not for browsing. |
+| `APP_DB` | Database path. Defaults to `data/app.db`, which is ephemeral on a host without a disk. |
+| `APP_INBOX_WATCH` | Inbox poller. On by default; startup ingest fills the document catalog. |
+| `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. Required for runs. |
+| `APP_TOKEN` | Optional. When set, every write needs an `X-API-Token` header. |
+| `READ_ONLY_DEMO=1` | Optional. Refuses every write with 403 while reads stay open. |
 
-The free Render plan has an ephemeral filesystem and sleeps when idle. The committed snapshot is restored on every deploy or restart, so the read-only demo always comes back with the same rows, and the first visit after a pause can take 30 to 60 seconds. For durable owner writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk. The hosted demo is connected through the Render GitHub App, so a push to `main` deploys it automatically.
+The free Render plan has an ephemeral filesystem and sleeps when idle. A restart starts with an empty ledger and no closed periods, and the startup ingest rebuilds the document catalog from the committed PDFs. The first visit after a pause can take 30 to 60 seconds. For durable writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk. The hosted demo is connected through the Render GitHub App, so a push to `main` deploys it automatically.
 
 Before a public deploy, run the check that matters:
 
@@ -47,7 +47,7 @@ Before a public deploy, run the check that matters:
 python run.py --check
 ```
 
-Then confirm the hosted instance reports `read_only` at `/config` and returns 403 on `POST /run` without the token. HTTPS, the public hostname, and restart supervision belong to the platform; the app binds `0.0.0.0` only because the platform forwards to it.
+Then confirm the hosted instance reports the mode you expect at `/config`: `open` for the public demo, `read_only` when that flag is set. HTTPS, the public hostname, and restart supervision belong to the platform; the app binds `0.0.0.0` only because the platform forwards to it.
 
 ## Run queue
 
@@ -70,15 +70,15 @@ Writes are open by default so local development stays frictionless. Two environm
 | `READ_ONLY_DEMO=1` | Every write returns 403. Reads stay open. |
 | both set | Visitors are read-only, and the owner can still write with the token. |
 
-The UI reads `GET /config`, hides Run, Approve, Reverse, Cancel, Clear, Ingest, Close, and Reopen while writes are locked, and shows the access state in the navbar. When a token is configured, Owner login stores it in this tab's sessionStorage and sends it only on write requests. Exports and views stay readable.
+The UI reads `GET /config` and hides Run, Approve, Reverse, Cancel, Clear, Ingest, Close, and Reopen while writes are locked. Exports and views stay readable.
 
-A public portfolio deployment:
+The hosted demo is open on purpose:
 
 ```powershell
-$env:APP_TOKEN = "<long random string>"
-$env:READ_ONLY_DEMO = "1"
 python -m uvicorn scripts.api:app --port 8000
 ```
+
+Set `APP_TOKEN` (and optionally `READ_ONLY_DEMO=1`) when the instance must be locked. A token-only instance expects the header on every write, because the UI has no token prompt.
 
 Anyone can browse the ledger, reconciliation, and run history; only a request carrying the token can start or change anything. Keep the token out of URLs and out of git. Binding the server to `127.0.0.1`, the default, keeps it off the network entirely. Use `--host 0.0.0.0` or a tunnel only when you mean to serve it.
 

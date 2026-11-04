@@ -9,11 +9,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
-      - key: READ_ONLY_DEMO
-        value: "1"
-      - key: APP_INBOX_WATCH
-        value: "0"
-      - key: APP_DB
-        value: demo/ledger.db
-      - key: APP_TOKEN
+      - key: GROQ_API_KEY
         sync: false
