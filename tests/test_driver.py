@@ -85,6 +85,14 @@ class _ToolCallRejected(Exception):
 class _ToolCallClient(_FlakyClient):
     """Raises a provider tool-call rejection once, then routes correctly."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.rotations = 0
+
+    def rotate_after_bad_answer(self, reason: str = "") -> bool:
+        self.rotations += 1
+        return True
+
     def create(self, **kwargs) -> _FakeCompletion:
         self.calls += 1
         if self.calls == 1:
@@ -92,11 +100,12 @@ class _ToolCallClient(_FlakyClient):
         return _FakeCompletion('{"action": "retrieve", "args": {"query": "rent"}}')
 
 
-def test_tool_call_rejection_is_retried_as_bad_answer() -> None:
+def test_tool_call_rejection_rotates_before_retry() -> None:
     client = _ToolCallClient()
     decision = decide(AgentState(task="t"), client, "test-model")
     assert decision.action == "retrieve"
     assert client.calls == 2
+    assert client.rotations == 1
 
 
 def test_prompt_carries_tool_catalog() -> None:

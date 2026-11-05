@@ -169,6 +169,9 @@ def decide(state: Any, client: Any, model: str, max_attempts: int = 2, context: 
             if not _is_tool_call_rejection(exc):
                 raise
             hint = "the provider rejected a tool-call shaped answer; reply with the JSON route only"
+            rotate = getattr(client, "rotate_after_bad_answer", None)
+            if callable(rotate):
+                rotate(reason="provider rejected a tool-call shaped answer")
             continue
         content = completion.choices[0].message.content or ""
         try:

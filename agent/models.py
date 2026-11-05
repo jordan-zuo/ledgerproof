@@ -241,6 +241,7 @@ class RotatingClient:
         self._disabled: dict[str, str] = {}
         self._last_error: dict[str, str] = {}
         self._current: ModelSpec | None = None
+        self._last_failed: ModelSpec | None = None
         self._lock = threading.RLock()
         raw_wait = os.environ.get("MODEL_POOL_MAX_WAIT", "").strip()
         if raw_wait:
@@ -355,6 +356,8 @@ class RotatingClient:
                     raise
                 except Exception as exc:
                     if self._record_failure(spec, exc):
+                        with self._lock:
+                            self._last_failed = spec
                         raise
                     continue
                 if not _has_content(completion):
@@ -362,6 +365,7 @@ class RotatingClient:
                     continue
                 with self._lock:
                     self._current = spec
+                    self._last_failed = None
                     self.last_label = spec.label
                     if not self.used or self.used[-1] != spec.label:
                         self.used.append(spec.label)
@@ -396,6 +400,24 @@ class RotatingClient:
             return True
         self._cool(spec, 30.0, reason)
         return False
+
+    def rotate_after_bad_answer(self, reason: str = "bad answer") -> bool:
+        """Cool the model that just failed when another one can take the retry."""
+        now = time.monotonic()
+        with self._lock:
+            failing = self._last_failed or self._current
+            if failing is None:
+                return False
+            alternative = any(
+                spec is not failing
+                and spec.label not in self._disabled
+                and self._cooldown.get(spec.label, 0.0) <= now
+                for spec in self._specs
+            )
+        if not alternative:
+            return False
+        self._cool(failing, 30.0, reason)
+        return True
 
     def _cool(self, spec: ModelSpec, seconds: float, reason: str) -> None:
         with self._lock:

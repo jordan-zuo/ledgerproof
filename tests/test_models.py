@@ -61,6 +61,13 @@ class _AuthError(Exception):
         super().__init__("invalid api key")
 
 
+class _BadRequest(Exception):
+    status_code = 400
+
+    def __init__(self) -> None:
+        super().__init__("tool_choice is none, but model called a tool")
+
+
 def _client(specs: list[ModelSpec], providers: dict[str, _Provider], **kwargs) -> RotatingClient:
     return RotatingClient(
         specs,
@@ -82,6 +89,24 @@ def test_pool_rotates_and_cools_a_rate_limited_model() -> None:
     client.chat.completions.create(model="auto", messages=[])
     assert len(first.calls) == 1  # still cooling, never touched again
     assert len(second.calls) == 2
+
+
+def test_bad_answer_rotation_skips_the_failed_model_only_when_another_is_ready() -> None:
+    first = _Provider([_BadRequest()])
+    second = _Provider([_completion()])
+    client = _client([_spec("a"), _spec("b")], {"a": first, "b": second}, max_wait=0)
+
+    with pytest.raises(_BadRequest):
+        client.chat.completions.create(model="auto", messages=[])
+    assert client.rotate_after_bad_answer(reason="tool-call shaped") is True
+    assert client.chat.completions.create(model="auto", messages=[]) is not None
+    assert client.last_label == "b"
+
+    only = _Provider([_BadRequest()])
+    lonely = _client([_spec("a")], {"a": only}, max_wait=0)
+    with pytest.raises(_BadRequest):
+        lonely.chat.completions.create(model="auto", messages=[])
+    assert lonely.rotate_after_bad_answer() is False
 
 
 def test_pool_caps_output_tokens_per_spec() -> None:
