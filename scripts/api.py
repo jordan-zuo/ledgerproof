@@ -317,7 +317,7 @@ def config() -> dict[str, object]:
 def index(request: Request) -> Any:
     index_file = STATIC_DIR / "index.html"
     if "text/html" in request.headers.get("accept", "") and index_file.exists():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
     return {
         "service": "ledgerproof",
         "ui": "/ui",
@@ -338,7 +338,7 @@ def index(request: Request) -> Any:
 def ui() -> Any:
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=404, detail="UI not installed")
 
 
