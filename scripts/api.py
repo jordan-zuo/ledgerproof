@@ -9,7 +9,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import mimetypes
 import os
 import sqlite3
 import sys
@@ -20,12 +19,10 @@ from typing import Any
 import anyio
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "static"
-mimetypes.add_type("font/ttf", ".ttf")
 sys.path.insert(0, str(ROOT))
 
 from agent import store  # noqa: E402
@@ -88,7 +85,6 @@ async def lifespan(_: FastAPI) -> Any:
 
 
 app = FastAPI(title="Ledgerproof", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 TEST_CLIENT: Any = None
 
