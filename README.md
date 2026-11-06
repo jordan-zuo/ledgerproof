@@ -5,14 +5,7 @@ An approval-gated agent runtime for accounts payable. The model reads a bill and
 **[Open the live demo](https://ledgerproof-orchestrator.onrender.com/ui)**. No login needed. Writes are real, and the ledger resets when the instance redeploys. The first load after idle can take 30 to 60 seconds.
 
 [![CI](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml)
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue)](https://github.com/jordan-zuo/ledgerproof/blob/main/.python-version)
 [![Live demo](https://img.shields.io/badge/demo-live-brightgreen)](https://ledgerproof-orchestrator.onrender.com/ui)
-
-## Why I built this
-
-A language model can read a utility bill and type a number into a ledger. That is the easy part. The hard part is everything that makes the number safe to post: it has to come from the document, it has to be the payable amount rather than a subtotal, the bill must not already be in the ledger, a large payment has to wait for a person, a mistake has to be reversible without erasing history, and a closed month has to stay closed.
-
-Ledgerproof is a working answer to that. It is a small runtime built around one rule: the model proposes, the runtime decides. There is no agent framework and no container runtime. One Python process, one SQLite file, one static HTML page.
 
 ## What it does
 
@@ -45,7 +38,7 @@ Fourteen scenarios run through the real state machine with scripted tools and no
 | Trajectory efficiency | 1.0 |
 | Gating accuracy | 1.0 |
 
-Completion is 0.75 on purpose: three of the four completion cases finish, and the fourth is a stubborn tool that the step ceiling has to stop. The suite covers routing, the step ceiling, malformed arguments, grounding, bill arithmetic, period rules, gate denial, gate approval, and ledger row counts.
+Completion is 0.75 on purpose. Three of the four completion cases finish, and the fourth is a stubborn tool that the step ceiling has to stop. The suite covers routing, the step ceiling, malformed arguments, grounding, bill arithmetic, period rules, gate denial, gate approval, and ledger row counts.
 
 ### Live judged suite
 
@@ -75,6 +68,12 @@ Nine cases on 2026-11-02, rubric `judge-v3` (`0e5d7016`), agent `groq-120b` (`op
 | `period-question` | pass | pass | 2 | Answered 5 March 2023 to 4 April 2023, both quoted from the AGL snippet |
 | `compare-no-post` | pass | pass | 2 | Named Sam and 63.70 as the lower AGL bill; no post |
 | `absent-doc` | pass | pass | 3 | Reported the missing Jemena document and made no write |
+
+## Why I built this
+
+A language model can read a utility bill and type a number into a ledger. That is the easy part. The hard part is everything that makes the number safe to post: it has to come from the document, it has to be the payable amount rather than a subtotal, the bill must not already be in the ledger, a large payment has to wait for a person, a mistake has to be reversible without erasing history, and a closed month has to stay closed.
+
+Ledgerproof is a working answer to that. It is a small runtime built around one rule: the model proposes, the runtime decides. There is no agent framework and no container runtime. One Python process, one SQLite file, one static HTML page.
 
 ## The parts that were hard
 
