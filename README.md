@@ -69,38 +69,6 @@ Nine cases on 2026-11-02, rubric `judge-v3` (`0e5d7016`), agent `groq-120b` (`op
 | `compare-no-post` | pass | pass | 2 | Named Sam and 63.70 as the lower AGL bill; no post |
 | `absent-doc` | pass | pass | 3 | Reported the missing Jemena document and made no write |
 
-## Why I built this
-
-A language model can read a utility bill and type a number into a ledger. That is the easy part. The hard part is everything that makes the number safe to post: it has to come from the document, it has to be the payable amount rather than a subtotal, the bill must not already be in the ledger, a large payment has to wait for a person, a mistake has to be reversible without erasing history, and a closed month has to stay closed.
-
-Ledgerproof is a working answer to that. It is a small runtime built around one rule: the model proposes, the runtime decides. There is no agent framework and no container runtime. One Python process, one SQLite file, one static HTML page.
-
-## The parts that were hard
-
-### The model proposes, the runtime decides
-
-Routing is a pure function over typed Pydantic state. Tool arguments are validated before execution. The step ceiling belongs to the runner, not the prompt. A bad amount, a missing quote, or a period mismatch raises inside the tool and comes back as a failed step, not a silent no-op. The model never gets to decide that a write was allowed.
-
-### Evidence before money
-
-The ledger write requires a quoted snippet, an account, a period, and arithmetic that matches the bill. The grounding check matches a complete numeric token, not a substring: `13.00` is not grounded by a document that only says `113.00`, while a sentence ending in `$114.87.` still counts. The payable-amount check rejects a subtotal. The bill-math check reconciles the known bills. The period check rejects a bill from the wrong month. A plausible guess cannot reach the ledger.
-
-### One bill, one row
-
-Bill identity comes from the cited text, never from the model: account plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name collapses to one key. A run that is resumed after a crash cannot post the bill twice. The claim itself is a conditional SQLite update inside `BEGIN IMMEDIATE`, so two workers pointing at the same database cannot own the same run.
-
-### Approvals are a state, not a chat message
-
-A ticket is a row in SQLite with the evidence packet attached. The gate ends the step immediately. Approval resumes the run and re-runs grounding, math, amount due, period, and the closed-month guard before the write. Denial ends the run with no row. A second decision on the same ticket returns 409. Deciding a ticket on a `done`, `failed`, or `cancelled` run is refused, so a terminal status stays true. Cancelling at a gate denies the ticket and reports it, even if the exiting worker got there first.
-
-### A run has to survive its process
-
-`POST /run` writes a `pending` row and wakes a worker. A claim carries a 30 second lease and a 5 second heartbeat. If the process dies, the lease lapses and another worker resumes the run from step zero, where the bill identity guard makes replay safe. A run is retried at most three times, then failed with a recorded reason. Cancellation is a database flag as well as a local event, so the click reaches whichever process holds the run.
-
-### A closed month has to mean something
-
-A bill books to the month its billing period ends, then its issue month, then the posting month. Server time cannot be backdated, so closing the posting month would say nothing about the bills it was meant to finalise. A close appends a snapshot of bills, totals, and exceptions. New postings and reversals in a closed month are refused inside the same write transaction, so a close cannot race a write. A reopen appends an action and keeps the close history.
-
 ## Architecture
 
 ```text
@@ -137,6 +105,38 @@ browser (static HTML, SSE)
 | `agent/models.py` | provider pool, cooldowns, and key handling |
 | `scripts/api.py` | HTTP surface, SSE, exports, access control, abuse limits |
 | `static/index.html` | the entire UI, no build step |
+
+## Why I built this
+
+A language model can read a utility bill and type a number into a ledger. That is the easy part. The hard part is everything that makes the number safe to post: it has to come from the document, it has to be the payable amount rather than a subtotal, the bill must not already be in the ledger, a large payment has to wait for a person, a mistake has to be reversible without erasing history, and a closed month has to stay closed.
+
+Ledgerproof is a working answer to that. It is a small runtime built around one rule: the model proposes, the runtime decides. There is no agent framework and no container runtime. One Python process, one SQLite file, one static HTML page.
+
+## The parts that were hard
+
+### The model proposes, the runtime decides
+
+Routing is a pure function over typed Pydantic state. Tool arguments are validated before execution. The step ceiling belongs to the runner, not the prompt. A bad amount, a missing quote, or a period mismatch raises inside the tool and comes back as a failed step, not a silent no-op. The model never gets to decide that a write was allowed.
+
+### Evidence before money
+
+The ledger write requires a quoted snippet, an account, a period, and arithmetic that matches the bill. The grounding check matches a complete numeric token, not a substring: `13.00` is not grounded by a document that only says `113.00`, while a sentence ending in `$114.87.` still counts. The payable-amount check rejects a subtotal. The bill-math check reconciles the known bills. The period check rejects a bill from the wrong month. A plausible guess cannot reach the ledger.
+
+### One bill, one row
+
+Bill identity comes from the cited text, never from the model: account plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name collapses to one key. A run that is resumed after a crash cannot post the bill twice. The claim itself is a conditional SQLite update inside `BEGIN IMMEDIATE`, so two workers pointing at the same database cannot own the same run.
+
+### Approvals are a state, not a chat message
+
+A ticket is a row in SQLite with the evidence packet attached. The gate ends the step immediately. Approval resumes the run and re-runs grounding, math, amount due, period, and the closed-month guard before the write. Denial ends the run with no row. A second decision on the same ticket returns 409. Deciding a ticket on a `done`, `failed`, or `cancelled` run is refused, so a terminal status stays true. Cancelling at a gate denies the ticket and reports it, even if the exiting worker got there first.
+
+### A run has to survive its process
+
+`POST /run` writes a `pending` row and wakes a worker. A claim carries a 30 second lease and a 5 second heartbeat. If the process dies, the lease lapses and another worker resumes the run from step zero, where the bill identity guard makes replay safe. A run is retried at most three times, then failed with a recorded reason. Cancellation is a database flag as well as a local event, so the click reaches whichever process holds the run.
+
+### A closed month has to mean something
+
+A bill books to the month its billing period ends, then its issue month, then the posting month. Server time cannot be backdated, so closing the posting month would say nothing about the bills it was meant to finalise. A close appends a snapshot of bills, totals, and exceptions. New postings and reversals in a closed month are refused inside the same write transaction, so a close cannot race a write. A reopen appends an action and keeps the close history.
 
 ## Run it
 
