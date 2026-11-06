@@ -1380,6 +1380,9 @@
       </div>
       <div style="display: flex; gap: 12px; align-items: center;">
         <span id="period-summary" style="font-size: 12.5px; color: var(--text-muted);"></span>
+        <button class="pill-btn light" onclick="downloadLedgerCsv()">
+          Export all CSV
+        </button>
         <button class="pill-btn light" onclick="refreshPeriods()">
           Refresh
         </button>
@@ -2168,7 +2171,7 @@
             <td>${review}</td>
             <td>${action}</td>
             <td>
-              <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadLedgerCsv('${escapeHtml(period.period)}')">CSV</button>
+              <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadLedgerCsv('${escapeHtml(period.period)}')">Period CSV</button>
               <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadXeroCsv('${escapeHtml(period.period)}')">Xero CSV</button>
             </td>
           `;
@@ -2251,17 +2254,36 @@
     }
 
     async function downloadXeroCsv(period) {
-      const params = new URLSearchParams();
-      if (period) params.set('period', period);
       const fields = [
-        ['xero-contact', 'contact'],
-        ['xero-account-code', 'account_code'],
-        ['xero-tax-type', 'tax_type'],
-        ['xero-due-days', 'due_days'],
+        ['xero-contact', 'contact', 'supplier contact'],
+        ['xero-account-code', 'account_code', 'account code'],
+        ['xero-tax-type', 'tax_type', 'tax type'],
+        ['xero-due-days', 'due_days', 'due days'],
       ];
+      const values = {};
       fields.forEach(([id, key]) => {
         const el = document.getElementById(id);
-        if (el && el.value.trim()) params.set(key, el.value.trim());
+        values[key] = el ? el.value.trim() : '';
+      });
+      const missing = fields.filter(
+        ([, key]) => ['contact', 'account_code', 'tax_type'].includes(key) && !values[key]
+      );
+      if (missing.length) {
+        const target = document.getElementById(missing[0][0]);
+        if (target) {
+          target.scrollIntoView({ block: 'center' });
+          target.focus({ preventScroll: true });
+        }
+        notify(
+          `Xero export needs ${missing.map(([, , label]) => label).join(', ')}. Fill in the Xero mapping below.`,
+          'bad'
+        );
+        return;
+      }
+      const params = new URLSearchParams();
+      if (period) params.set('period', period);
+      fields.forEach(([, key]) => {
+        if (values[key]) params.set(key, values[key]);
       });
       try {
         const res = await fetch(`/export/xero.csv?${params.toString()}`);
