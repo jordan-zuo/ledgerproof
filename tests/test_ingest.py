@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+
 import scripts.api as api
 from agent import store
 from agent.ingest import InboxWatcher, ingest_once
@@ -171,3 +172,27 @@ def test_ledger_reset_keeps_document_metadata(ingestor) -> None:
 
     assert store.table_counts()["documents"] == 1
     assert store.list_documents()[0]["doc_id"] == "bill"
+
+
+def test_source_file_endpoint_serves_the_original_file(ingestor) -> None:
+    inbox, _ = ingestor
+    source = inbox / "Bill One.pdf"
+    payload = b"%PDF-1.4\n% provenance check\n"
+    source.write_bytes(payload)
+    store.upsert_document(
+        "bill-one",
+        source_name=source.name,
+        content_hash="hash",
+        size_bytes=len(payload),
+        modified_ns=1,
+        bill_key="acct:12345678|period:2023-03-01:2023-03-31",
+        identity_basis="account+period",
+    )
+
+    client = TestClient(api.app)
+    res = client.get("/documents/bill-one/file")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/pdf"
+    assert res.content == payload
+    assert client.get("/documents/missing/file").status_code == 404

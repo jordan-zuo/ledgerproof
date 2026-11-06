@@ -93,7 +93,7 @@ One ingest does four things:
 - Two files with the same `doc_id` and different text are a collision. The corpus keeps one text, the other file is named in the report, and nothing is overwritten silently. Rename the ignored file to give it its own id.
 - Canonical bill identity is computed and stored at ingest time: account plus period, then account plus issue date, then the document fallback. Two doc ids for the same bill are reported and marked in `GET /documents`, so a duplicate is visible before an agent runs.
 
-`GET /documents` is the catalog the UI uses: identity basis, account, period, source file, text size, a preview, and duplicate flags. Unsupported, empty, and no-text PDF files are reported as skipped. Corpus writes are atomic, and a lock file serializes ingest across processes, so several uvicorn workers can watch one inbox. `POST /ingest` is gated by the same write rules as every other mutation. Existing corpus documents without an inbox file stay in place, and clearing the ledger keeps document metadata.
+`GET /documents` is the catalog the UI uses: identity basis, account, period, source file, text size, a preview, and duplicate flags. `GET /documents/{doc_id}/file` serves the original inbox file, so the catalog and evidence citations link the exact PDF the extraction came from. Unsupported, empty, and no-text PDF files are reported as skipped. Corpus writes are atomic, and a lock file serializes ingest across processes, so several uvicorn workers can watch one inbox. `POST /ingest` is gated by the same write rules as every other mutation. Existing corpus documents without an inbox file stay in place, and clearing the ledger keeps document metadata.
 
 ## Ledger guarantees
 

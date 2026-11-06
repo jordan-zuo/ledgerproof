@@ -14,7 +14,7 @@ The hosted instance allows public writes, so the full flow runs in the browser. 
 | 1:00 | Financial Ledger | One row per bill. Open a trail to show the posting, its evidence snippet, and any reversal. |
 | 1:15 | Bill Reconciliation | Status per bill: posted, corrected, reversed, conflict, duplicate. Point at outstanding versus net. |
 | 1:30 | Period Close & Export | Close 2023-04, the month the AGL bill period ends in. Reversing the AGL row returns 409. Reopen, reverse, and watch the corrected bill. Download the whole ledger CSV, or a single period from its row. |
-| 1:50 | Document Catalog | Identity basis, account, period, source file, and duplicate flags. This is the check that runs before the agent sees a bill. |
+| 1:50 | Document Catalog | Identity basis, account, period, source file, and duplicate flags. Click Open PDF to compare the extracted text with the original bill. This is the check that runs before the agent sees a bill. |
 | 2:00 | Stop | Close on the guarantee: nothing posts without evidence, a gate, and a bill identity that is not already in the ledger. |
 
 A restart starts with an empty ledger and no closed periods. The startup ingest rebuilds the document catalog from the three committed PDFs, so the catalog is ready even when the ledger is empty.

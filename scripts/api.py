@@ -47,6 +47,7 @@ from agent.guardrails import assess_due_amount, assess_grounding  # noqa: E402
 from agent.ingest import (  # noqa: E402
     InboxWatcher,
     document_catalog,
+    inbox_path,
     ingest_once,
     watcher_enabled,
 )
@@ -348,6 +349,31 @@ def documents() -> dict[str, Any]:
     """The catalog an operator checks before a run: identity and duplicates."""
     store.init_db()
     return document_catalog(_docs(), store.list_documents())
+
+
+@app.get("/documents/{doc_id}/file")
+def document_file(doc_id: str) -> FileResponse:
+    """Serve the original inbox file behind a catalog entry."""
+    store.init_db()
+    row = next(
+        (doc for doc in store.list_documents() if doc["doc_id"] == doc_id),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    name = str(row.get("source_name") or "")
+    source = Path(name)
+    if (
+        not name
+        or source.name != name
+        or source.suffix.lower() not in {".pdf", ".txt", ".md"}
+    ):
+        raise HTTPException(status_code=404, detail="Source file not available")
+    root = inbox_path().resolve()
+    candidate = (root / name).resolve()
+    if candidate.parent != root or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Source file not available")
+    return FileResponse(candidate, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/ingest", dependencies=[Depends(require_write)])

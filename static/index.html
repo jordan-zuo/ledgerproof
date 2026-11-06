@@ -957,6 +957,15 @@
       line-height: 1.5;
     }
 
+    .source-link {
+      margin-left: auto;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-main);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
     .doc-meta {
       font-size: 12px;
       color: var(--text-muted);
@@ -1881,7 +1890,7 @@
       const citationHtml = citations.length
         ? citations.map(c => `
             <div style="font-size: 11px; background: rgba(0,0,0,0.04); border-radius: 6px; padding: 6px 8px; margin-top: 4px;">
-              <strong>${escapeHtml(c.doc_id)}</strong><br>
+              <strong><a href="/documents/${encodeURIComponent(c.doc_id)}/file" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline; text-underline-offset: 2px;">${escapeHtml(c.doc_id)}</a></strong><br>
               ${escapeHtml(String(c.text || '').slice(0, 240))}${String(c.text || '').length > 240 ? '…' : ''}
             </div>`).join('')
         : (hasPacket
@@ -2434,10 +2443,17 @@
           if (doc.period_start) meta.push(`${doc.period_start} to ${doc.period_end}`);
           if (doc.issue_date) meta.push(`Issued ${doc.issue_date}`);
           const more = doc.text_chars > 400 ? ' ...' : '';
+          const sourceUrl = doc.source_name
+            ? `/documents/${encodeURIComponent(doc.doc_id)}/file`
+            : '';
+          const sourceLabel = String(doc.source_name).toLowerCase().endsWith('.pdf')
+            ? 'Open PDF'
+            : 'Open source';
           div.innerHTML = `
             <div class="corpus-id">
               <span class="doc-pill">${escapeHtml(doc.doc_id)}</span>
               ${doc.duplicate ? '<span class="dup-badge">Duplicate bill</span>' : ''}
+              ${sourceUrl ? `<a class="source-link" href="${sourceUrl}" target="_blank" rel="noopener">${sourceLabel}</a>` : ''}
             </div>
             <div class="doc-meta">${escapeHtml(meta.join(' | '))}</div>
             <div class="corpus-text">${escapeHtml(doc.preview)}${more}</div>
