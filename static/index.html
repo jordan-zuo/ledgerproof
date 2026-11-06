@@ -1412,30 +1412,6 @@
       </table>
     </div>
 
-    <div class="ledger-container" style="padding: 16px; margin-bottom: 20px;">
-      <div class="card-label" style="margin-bottom: 10px;">Xero bill export mapping</div>
-      <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
-        <label style="font-size: 12px; color: var(--text-muted);">Supplier contact<br>
-          <input id="xero-contact" type="text" placeholder="e.g. AGL" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 170px;">
-        </label>
-        <label style="font-size: 12px; color: var(--text-muted);">Account code<br>
-          <input id="xero-account-code" type="text" placeholder="e.g. 400" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 100px;">
-        </label>
-        <label style="font-size: 12px; color: var(--text-muted);">Tax type<br>
-          <input id="xero-tax-type" type="text" placeholder="e.g. INPUT" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 110px;">
-        </label>
-        <label style="font-size: 12px; color: var(--text-muted);">Due days<br>
-          <input id="xero-due-days" type="number" min="0" max="365" placeholder="0" style="margin-top: 4px; padding: 7px 10px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); font-size: 12.5px; width: 80px;">
-        </label>
-        <button class="pill-btn light" onclick="downloadXeroCsv()">
-          Download all outstanding
-        </button>
-      </div>
-      <div style="font-size: 12px; color: var(--text-muted); margin-top: 10px;">
-        Xero needs the supplier, account code, and tax type because the ledger stores evidence and amounts, not your chart of accounts. Invoice date is the bill issue date, then period end, then posting date. Due date defaults to the invoice date.
-      </div>
-    </div>
-
     <!-- Financial Ledger Table -->
     <div class="section-head" id="ledger">
       <div>
@@ -1545,24 +1521,7 @@
       } catch (e) {
         access = { mode: 'open', read_only: false };
       }
-      applyXeroDefaults();
       applyAccess();
-    }
-
-    function applyXeroDefaults() {
-      const defaults = access.xero || {};
-      const fields = [
-        ['xero-contact', 'contact'],
-        ['xero-account-code', 'account_code'],
-        ['xero-tax-type', 'tax_type'],
-        ['xero-due-days', 'due_days'],
-      ];
-      fields.forEach(([id, key]) => {
-        const el = document.getElementById(id);
-        if (el && !el.value && defaults[key] !== undefined && defaults[key] !== null) {
-          el.value = defaults[key];
-        }
-      });
     }
 
     function setTask(text) {
@@ -2172,7 +2131,6 @@
             <td>${action}</td>
             <td>
               <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadLedgerCsv('${escapeHtml(period.period)}')">Period CSV</button>
-              <button class="pill-btn light" style="padding: 5px 10px; font-size: 11.5px;" onclick="downloadXeroCsv('${escapeHtml(period.period)}')">Xero CSV</button>
             </td>
           `;
           tbody.appendChild(tr);
@@ -2251,59 +2209,6 @@
         ? `/export/ledger.csv?period=${encodeURIComponent(period)}`
         : '/export/ledger.csv';
       window.location.href = url;
-    }
-
-    async function downloadXeroCsv(period) {
-      const fields = [
-        ['xero-contact', 'contact', 'supplier contact'],
-        ['xero-account-code', 'account_code', 'account code'],
-        ['xero-tax-type', 'tax_type', 'tax type'],
-        ['xero-due-days', 'due_days', 'due days'],
-      ];
-      const values = {};
-      fields.forEach(([id, key]) => {
-        const el = document.getElementById(id);
-        values[key] = el ? el.value.trim() : '';
-      });
-      const missing = fields.filter(
-        ([, key]) => ['contact', 'account_code', 'tax_type'].includes(key) && !values[key]
-      );
-      if (missing.length) {
-        const target = document.getElementById(missing[0][0]);
-        if (target) {
-          target.scrollIntoView({ block: 'center' });
-          target.focus({ preventScroll: true });
-        }
-        notify(
-          `Xero export needs ${missing.map(([, , label]) => label).join(', ')}. Fill in the Xero mapping below.`,
-          'bad'
-        );
-        return;
-      }
-      const params = new URLSearchParams();
-      if (period) params.set('period', period);
-      fields.forEach(([, key]) => {
-        if (values[key]) params.set(key, values[key]);
-      });
-      try {
-        const res = await fetch(`/export/xero.csv?${params.toString()}`);
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.detail || `HTTP ${res.status}`);
-        }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `xero-bills-${period || 'all'}.csv`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-        notify(`Xero export downloaded${period ? ` for ${period}` : ''}.`, 'ok');
-      } catch (e) {
-        notify('Xero export failed: ' + e.message, 'bad');
-      }
     }
 
     async function refreshLedger() {

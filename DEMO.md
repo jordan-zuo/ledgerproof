@@ -13,7 +13,7 @@ The hosted instance allows public writes, so the full flow runs in the browser. 
 | 0:40 | Run Task | `Post the Origin standing bill total amount due.` The amount is over the gate threshold, so the run parks in Pending Approvals at 13,376.47 AUD. Approve it and one row lands. |
 | 1:00 | Financial Ledger | One row per bill. Open a trail to show the posting, its evidence snippet, and any reversal. |
 | 1:15 | Bill Reconciliation | Status per bill: posted, corrected, reversed, conflict, duplicate. Point at outstanding versus net. |
-| 1:30 | Period Close & Export | Close 2023-04, the month the AGL bill period ends in. Reversing the AGL row returns 409. Reopen, reverse, and watch the corrected bill. Download the ledger CSV; the Xero CSV returns 400 until contact, account code, and tax type are set. |
+| 1:30 | Period Close & Export | Close 2023-04, the month the AGL bill period ends in. Reversing the AGL row returns 409. Reopen, reverse, and watch the corrected bill. Download the whole ledger CSV, or a single period from its row. |
 | 1:50 | Document Catalog | Identity basis, account, period, source file, and duplicate flags. This is the check that runs before the agent sees a bill. |
 | 2:00 | Stop | Close on the guarantee: nothing posts without evidence, a gate, and a bill identity that is not already in the ledger. |
 
