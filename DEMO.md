@@ -8,7 +8,7 @@ The hosted instance allows public writes, so the full flow runs in the browser. 
 
 | Time | Where | What to show |
 | --- | --- | --- |
-| 0:00 | `/ui` | The task box and write controls are visible. The hero states the claim: deterministic steps, evidence, and a human gate. |
+| 0:00 | `/ui` | The task box and write controls are visible. The hero states the claim: deterministic steps, evidence, and a human gate. The empty timeline and ledger offer a one-click Run AGL sample task. |
 | 0:10 | Run Task | `Find the AGL sample bill and post the amount due.` The timeline streams retrieval, evidence, and one ledger write for 63.70 AUD. |
 | 0:40 | Run Task | `Post the Origin standing bill total amount due.` The amount is over the gate threshold, so the run parks in Pending Approvals at 13,376.47 AUD. Approve it and one row lands. |
 | 1:00 | Financial Ledger | One row per bill. Open a trail to show the posting, its evidence snippet, and any reversal. |

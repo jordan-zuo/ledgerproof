@@ -639,6 +639,31 @@
       gap: 14px;
     }
 
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 40px 20px;
+      text-align: center;
+    }
+
+    .empty-state-title {
+      font-size: 16px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+    }
+
+    .empty-state-copy {
+      font-size: 13.5px;
+      color: var(--text-muted);
+      max-width: 44ch;
+    }
+
+    .empty-state .pill-btn {
+      margin-top: 6px;
+    }
+
     .event-item {
       display: flex;
       gap: 14px;
@@ -1117,6 +1142,29 @@
         max-width: none;
       }
     }
+
+    @media (max-width: 700px) {
+      .section-head {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .section-head > div:last-child {
+        flex-wrap: wrap;
+      }
+      .section-subtitle {
+        max-width: none;
+        text-align: left;
+      }
+      .ledger-container,
+      .run-list-container {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .empty-state {
+        padding: 32px 16px;
+      }
+    }
   </style>
 </head>
 <body class="access-pending">
@@ -1319,8 +1367,14 @@
           </div>
         </div>
         <div class="timeline-list" id="events-timeline">
-          <div style="text-align: center; padding: 48px 20px; color: var(--text-light);">
-            Submit a task above to watch the agent route and stream verifiable steps.
+          <div class="empty-state">
+            <div class="empty-state-title">No runs yet</div>
+            <div class="empty-state-copy">
+              Start the prefilled AGL sample task. One run fills this timeline with retrieval, evidence, and the ledger write, and the tables below fill in behind it.
+            </div>
+            <button class="pill-btn empty-state-cta write-control" onclick="runSampleTask(this)">
+              Run AGL sample task
+            </button>
           </div>
         </div>
       </div>
@@ -1438,7 +1492,16 @@
     </div>
 
     <div class="ledger-container">
-      <table class="ledger-table">
+      <div class="empty-state" id="ledger-empty-state" style="display: none;">
+        <div class="empty-state-title">No entries posted yet</div>
+        <div class="empty-state-copy">
+          Run the AGL sample task above to post the first bill. One run fills the ledger, reconciliation, and period tables.
+        </div>
+        <button class="pill-btn empty-state-cta write-control" onclick="runSampleTask(this)">
+          Run AGL sample task
+        </button>
+      </div>
+      <table class="ledger-table" id="ledger-table">
         <thead>
           <tr>
             <th>Source Document</th>
@@ -1501,6 +1564,7 @@
     let renderedSteps = 0;
     let reconciliationBills = [];
     let access = { mode: 'open', read_only: false };
+    const SAMPLE_TASK = 'Reconcile the AGL sample bill and post the amount due.';
 
     function canWrite() {
       return access.mode !== 'read_only';
@@ -1536,6 +1600,37 @@
     function setTask(text) {
       document.getElementById('task-input').value = text;
       document.getElementById('task-input').focus();
+    }
+
+    function runIsLive() {
+      return Boolean(activeRunId) &&
+        ['pending', 'running', 'awaiting_approval'].includes(activeRunStatus);
+    }
+
+    async function runSampleTask(btn) {
+      if (!canWrite()) {
+        notify(writeLockedMessage(), 'bad');
+        return;
+      }
+      if (runIsLive()) {
+        notify('A run is already in progress. Open it in the timeline.', 'bad');
+        return;
+      }
+      const input = document.getElementById('task-input');
+      if (input) input.value = SAMPLE_TASK;
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Starting...';
+      }
+      try {
+        await executeRun();
+        document.getElementById('timeline')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } finally {
+        if (btn && btn.isConnected) {
+          btn.disabled = false;
+          btn.innerText = 'Run AGL sample task';
+        }
+      }
     }
 
     function newRequestId() {
@@ -1691,7 +1786,7 @@
       if (event.kind === 'decision') return;
       const timeline = document.getElementById('events-timeline');
       if (!timeline) return;
-      const placeholder = timeline.querySelector('div[style*="padding: 24px"]');
+      const placeholder = timeline.querySelector('.empty-state, div[style*="padding: 24px"]');
       if (placeholder) timeline.innerHTML = '';
 
       const [label, kindClass] = EVENT_LABELS[event.kind] || [event.kind, ''];
@@ -2224,14 +2319,20 @@
       refreshReconciliation();
       refreshPeriods();
       const tbody = document.getElementById('ledger-body');
+      const table = document.getElementById('ledger-table');
+      const empty = document.getElementById('ledger-empty-state');
       try {
         const res = await fetch('/ledger');
         const data = await res.json();
         if (!data.entries || data.entries.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px; color: var(--text-muted);">No entries posted to ledger yet.</td></tr>`;
+          tbody.innerHTML = '';
+          if (table) table.style.display = 'none';
+          if (empty) empty.style.display = 'flex';
           return;
         }
 
+        if (table) table.style.display = '';
+        if (empty) empty.style.display = 'none';
         tbody.innerHTML = '';
         data.entries.forEach(entry => {
           const tr = document.createElement('tr');
@@ -2266,6 +2367,8 @@
           tbody.appendChild(tr);
         });
       } catch (e) {
+        if (table) table.style.display = '';
+        if (empty) empty.style.display = 'none';
         tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--accent-rust);">Failed to load ledger: ${e.message}</td></tr>`;
       }
     }
