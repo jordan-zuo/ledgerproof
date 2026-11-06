@@ -1,151 +1,131 @@
-# Ledgerproof: Deterministic Bill Posting with an Approval Gate
+# Ledgerproof
 
-Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
+An approval-gated agent runtime for accounts payable. The model reads a bill and proposes one step. The runtime checks the number against the source document, enforces the ledger rules, and stops for a human before money moves.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, a free-model pool with rotation, and a one-command launcher that runs on a native Python host without Docker. 193 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
+[Live demo](https://ledgerproof-orchestrator.onrender.com/ui) | [Two-minute walkthrough](DEMO.md) | [Design notes](CASE_STUDY.md) | [Live eval report](eval/report.md)
 
-## Run
+[![CI](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml)
 
-```powershell
-pip install -r requirements.txt
-python run.py
+## Why I built this
+
+A language model can read a utility bill and type a number into a ledger. That is the easy part. The hard part is everything that makes the number safe to post: it has to come from the document, it has to be the payable amount rather than a subtotal, the bill must not already be in the ledger, a large payment has to wait for a person, a mistake has to be reversible without erasing history, and a closed month has to stay closed.
+
+Ledgerproof is a working answer to that. It is a small runtime built around one rule: the model proposes, the runtime decides. There is no agent framework and no container runtime. One Python process, one SQLite file, one static HTML page.
+
+## What it does
+
+1. A task asks for a bill to be posted.
+2. A worker claims the run and asks the model for one JSON step: retrieve, write to the ledger, request approval, or finish.
+3. Retrieval is the only source of evidence. A write must quote the amount in the cited text, match known bill arithmetic, name the payable amount rather than a subtotal, match the bill period, and survive the duplicate check.
+4. Above the threshold, or when the model asks, the runtime opens a real approval ticket and ends the step. Approval re-runs the checks before anything is written.
+5. Ledger rows are append-only. A correction is a signed negative row linked to the original. Closing a month freezes a snapshot and refuses later postings in that month.
+6. Every step is stored and streamed over SSE. A run says `done` only when the requested end state actually exists.
+
+## The parts that were hard
+
+### The model proposes, the runtime decides
+
+Routing is a pure function over typed Pydantic state. Tool arguments are validated before execution. The step ceiling belongs to the runner, not the prompt. A bad amount, a missing quote, or a period mismatch raises inside the tool and comes back as a failed step, not a silent no-op. The model never gets to decide that a write was allowed.
+
+### Evidence before money
+
+The ledger write requires a quoted snippet, an account, a period, and arithmetic that matches the bill. The grounding check matches a complete numeric token, not a substring: `13.00` is not grounded by a document that only says `113.00`, while a sentence ending in `$114.87.` still counts. The payable-amount check rejects a subtotal. The bill-math check reconciles the known bills. The period check rejects a bill from the wrong month. A plausible guess cannot reach the ledger.
+
+### One bill, one row
+
+Bill identity comes from the cited text, never from the model: account plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name collapses to one key. A run that is resumed after a crash cannot post the bill twice. The claim itself is a conditional SQLite update inside `BEGIN IMMEDIATE`, so two workers pointing at the same database cannot own the same run.
+
+### Approvals are a state, not a chat message
+
+A ticket is a row in SQLite with the evidence packet attached. The gate ends the step immediately. Approval resumes the run and re-runs grounding, math, amount due, period, and the closed-month guard before the write. Denial ends the run with no row. A second decision on the same ticket returns 409. Deciding a ticket on a `done`, `failed`, or `cancelled` run is refused, so a terminal status stays true. Cancelling at a gate denies the ticket and reports it, even if the exiting worker got there first.
+
+### A run has to survive its process
+
+`POST /run` writes a `pending` row and wakes a worker. A claim carries a 30 second lease and a 5 second heartbeat. If the process dies, the lease lapses and another worker resumes the run from step zero, where the bill identity guard makes replay safe. A run is retried at most three times, then failed with a recorded reason. Cancellation is a database flag as well as a local event, so the click reaches whichever process holds the run.
+
+### A closed month has to mean something
+
+A bill books to the month its billing period ends, then its issue month, then the posting month. Server time cannot be backdated, so closing the posting month would say nothing about the bills it was meant to finalise. A close appends a snapshot of bills, totals, and exceptions. New postings and reversals in a closed month are refused inside the same write transaction, so a close cannot race a write. A reopen appends an action and keeps the close history.
+
+## Architecture
+
+```text
+browser (static HTML, SSE)
+          |
+          v
+  FastAPI routes (scripts/api.py)
+  auth, limits, body cap
+          |
+          v
+  SQLite in WAL mode  <-->  dispatcher (agent/dispatch.py)
+  runs, events,             claim, heartbeat, cancel
+  approvals, ledger,              |
+  documents, closures             v
+                            runner (agent/runner.py)
+                            step loop and ceiling
+                                  |
+                                  v
+                            router, guardrails, bill identity,
+                            ledger flow, retrieval, model pool
 ```
 
-`run.py` loads `.env`, creates the database, prints the access mode, and opens `http://127.0.0.1:8000/ui`. `python run.py --check` prints an install report and exits without a server: Python version, database path, corpus size, UI presence, access mode, and how many model specs have keys. `--read-only` refuses writes, `--port` and `--host` set the bind, and `--reload` restarts on edits.
-
-```powershell
-python -m pytest -q
-python scripts/evaluate.py
-```
-
-Live public demo: https://ledgerproof-orchestrator.onrender.com/ui
-
-[DEMO.md](DEMO.md) is the two-minute walkthrough. [CASE_STUDY.md](CASE_STUDY.md) covers the design, the evidence, and the limits.
-
-## Deploy without Docker
-
-The app is one Python process over SQLite, so it runs on a native Python runtime. There is no Dockerfile, no container build, and no image registry. `render.yaml` is a Render blueprint for its Python runtime, and `Procfile` is the same start command for Railway, Heroku, or any platform that can run `python run.py`.
-
-[Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/ledgerproof)
-
-The blueprint runs one Python process with the default ephemeral SQLite database and the inbox watcher on, so a fresh instance ingests the three sample PDFs at startup. The hosted instance allows public writes: anyone can run a task, approve the gate, and close a period. Data resets when the instance restarts or redeploys.
-
-| Setting | What it does |
+| Path | Responsibility |
 | --- | --- |
-| `PORT` | Injected by the platform. `run.py` reads it when `--port` is absent. |
-| `APP_DB` | Database path. Defaults to `data/app.db`, which is ephemeral on a host without a disk. |
-| `APP_INBOX_WATCH` | Inbox poller. On by default; startup ingest fills the document catalog. |
-| `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. Required for runs. |
-| `APP_TOKEN` | Optional. When set, every write needs an `X-API-Token` header. |
-| `READ_ONLY_DEMO=1` | Optional. Refuses every write with 403 while reads stay open. |
+| `agent/states.py` | typed state, evidence, and step decisions |
+| `agent/router.py` | the pure routing function |
+| `agent/runner.py` | the step loop, ceiling, and cancellation checks |
+| `agent/guardrails.py` | grounding, payable amount, period, approval threshold |
+| `agent/ledger_flow.py` | approval resume and the ledger write path |
+| `agent/store.py` | schema, queue, ledger, events, tickets, closures, reset |
+| `agent/dispatch.py` | claims, leases, heartbeat, durable cancellation |
+| `agent/tools.py` | retrieval and ledger tools |
+| `agent/driver.py` | prompt, JSON step parsing, and one retry |
+| `agent/models.py` | provider pool, cooldowns, and key handling |
+| `scripts/api.py` | HTTP surface, SSE, exports, access control, abuse limits |
+| `static/index.html` | the entire UI, no build step |
 
-The free Render plan has an ephemeral filesystem and sleeps when idle. A restart starts with an empty ledger and no closed periods, and the startup ingest rebuilds the document catalog from the committed PDFs. The first visit after a pause can take 30 to 60 seconds. For durable writes, add a disk mounted at `/var/data` and set `APP_DB=/var/data/app.db`; Railway needs the same volume. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk. The hosted demo is connected through the Render GitHub App, so a push to `main` deploys it automatically.
+## How it is verified
 
-Before a public deploy, run the check that matters:
-
-```powershell
-python run.py --check
-```
-
-Then confirm the hosted instance reports the mode you expect at `/config`: `open` for the public demo, `read_only` when that flag is set. HTTPS, the public hostname, and restart supervision belong to the platform; the app binds `0.0.0.0` only because the platform forwards to it.
-
-## Run queue
-
-`POST /run` writes a pending row and wakes a worker. Workers claim one run at a time with a conditional SQLite update, so several processes pointed at the same database cannot run the same job twice. A claim carries a 30-second lease and a 5-second heartbeat; if a process dies, the lease lapses and another worker resumes the run from step zero. The ledger's bill identity guard keeps a resumed run from posting the same bill again. A run is retried at most three times, then failed, so a crash loop cannot spend quota forever. Cancellation writes a durable flag as well as waking the local worker, so a cancel reaches whichever process holds the run.
-
-```powershell
-python -m uvicorn scripts.api:app --port 8000 --workers 2
-```
-
-The queue is SQLite, so this covers a handful of workers on one machine or a shared volume, not a distributed fleet. A worker stalled longer than its lease can be resumed while it is still alive; the ledger rejects the duplicate posting, but that run may record the resumed attempt.
-
-## Access control
-
-Writes are open by default so local development stays frictionless. Two environment variables change that:
-
-| Setting | Effect |
-| --- | --- |
-| neither set | Open. Anyone who can reach the port can run tasks and change the ledger. |
-| `APP_TOKEN` set | Every write needs an `X-API-Token` header. Reads stay open. |
-| `READ_ONLY_DEMO=1` | Every write returns 403. Reads stay open. |
-| both set | Visitors are read-only, and the owner can still write with the token. |
-
-The UI reads `GET /config` and hides Run, Approve, Reverse, Cancel, Clear, Ingest, Close, and Reopen while writes are locked. Exports and views stay readable.
-
-The hosted demo is open on purpose:
-
-```powershell
-python -m uvicorn scripts.api:app --port 8000
-```
-
-Set `APP_TOKEN` (and optionally `READ_ONLY_DEMO=1`) when the instance must be locked. A token-only instance expects the header on every write, because the UI has no token prompt.
-
-Anyone can browse the ledger, reconciliation, and run history; only a request carrying the token can start or change anything. Keep the token out of URLs and out of git. Binding the server to `127.0.0.1`, the default, keeps it off the network entirely. Use `--host 0.0.0.0` or a tunnel only when you mean to serve it.
-
-## Ingestion
-
-The inbox is `data/inbox` (`APP_INBOX` moves it) and the corpus is `data/corpus.json` (`APP_CORPUS` moves it). Drop in `.txt`, `.md`, or `.pdf` files and either `POST /ingest`, run `python scripts/ingest.py`, or let the watcher do it. The watcher starts with the server, polls every 5 seconds (`APP_INGEST_INTERVAL`), and ingests only when a file name, size, or modification time changed. `APP_INBOX_WATCH=0` disables it.
-
-One ingest does four things:
-
-- `doc_id` is the file stem, lowercased, with whitespace collapsed to hyphens.
-- Two files with the same `doc_id` and the same text are one source; the first file name owns it and the other is reported as a duplicate source.
-- Two files with the same `doc_id` and different text are a collision. The corpus keeps one text, the other file is named in the report, and nothing is overwritten silently. Rename the ignored file to give it its own id.
-- Canonical bill identity is computed and stored at ingest time: account plus period, then account plus issue date, then the document fallback. Two doc ids for the same bill are reported and marked in `GET /documents`, so a duplicate is visible before an agent runs.
-
-`GET /documents` is the catalog the UI uses: identity basis, account, period, source file, text size, a preview, and duplicate flags. `GET /documents/{doc_id}/file` serves the original inbox file, so the catalog and evidence citations link the exact PDF the extraction came from. Unsupported, empty, and no-text PDF files are reported as skipped. Corpus writes are atomic, and a lock file serializes ingest across processes, so several uvicorn workers can watch one inbox. `POST /ingest` is gated by the same write rules as every other mutation. Existing corpus documents without an inbox file stay in place, and clearing the ledger keeps document metadata.
-
-## Ledger guarantees
-
-One bill is one identity. The key is derived from the cited text, never from the model: account number plus billing period, then account plus issue date, then the document id. The same bill filed under a PDF name and a text name cannot be posted twice.
-
-Corrections are append-only. `POST /ledger/{id}/reverse` appends a negative row linked to the original, with a required reason and approver; the original stays in place. A reversed posting no longer blocks a corrected re-post, while a double reversal or a reversal of a reversal returns 409.
-
-The reconciliation view reads the rows back per bill. `GET /reconciliation` groups by canonical key, reports the outstanding and net amounts, flags conflicting outstanding amounts and duplicate postings, and keeps the full posting and reversal trail. The UI shows one row per bill with a trail modal, so a correction filed under a second document id still appears as one bill.
-
-## Export and period close
-
-A bill is booked to the month its billing period ends, then to its issue month, and only then to the month its ledger row was written. Server time cannot be backdated, so a posting-month close would say nothing about the bills it was meant to finalise. `GET /periods` lists those months with open or closed state, bills, outstanding and net totals per currency, and any bill still flagged conflict or duplicate.
-
-`POST /periods/{period}/close` appends a close action with the totals it froze. While a month is closed, a new posting or a reversal for a bill in that month is refused with 409; other months continue. `POST /periods/{period}/reopen` appends a reopen action so a correction can be recorded, and the close action plus its snapshot stay in the history. The UI shows the same view and applies the write rules to Close and Reopen.
-
-Two exports read the same rows:
-
-| Endpoint | Shape |
-| --- | --- |
-| `GET /export/ledger.csv?period=YYYY-MM&scope=all\|outstanding` | Every audit field: canonical bill key, accounting period and its basis, account and bill dates, amount, currency, bill status, run, entry, reversal link, reason, approver, recorded time, and whether the period is closed. |
-| `GET /export/xero.csv?period=YYYY-MM&contact=&account_code=&tax_type=&due_days=` | Xero bill import columns for outstanding bills only. A corrected bill exports its live replacement; the reversed row is absent. |
-
-Xero needs a supplier contact, account code, and tax type. The ledger stores evidence and amounts, not your chart of accounts, so the endpoint returns 400 and names the missing fields instead of inventing them. Set `XERO_CONTACT`, `XERO_ACCOUNT_CODE`, `XERO_TAX_TYPE`, and `XERO_DUE_DAYS` to make them defaults. Invoice date is the issue date, then the period end, then the posting date; due date is the invoice date plus `due_days` (default 0). Exports are reads and stay open in read-only mode.
-
-## Live judged eval
-
-The offline eval is scripted and deterministic: 14 scenarios through the real state machine with no model in the loop. The live suite asks a real model to work the actual bills, applies deterministic hard checks, then asks a second model to explain the trajectory against rubric `judge-v3`.
-
-```powershell
-python scripts/judged_evaluate.py --dry-run
-python scripts/judged_evaluate.py --case agl-due-post
-python scripts/judged_evaluate.py
-```
-
-Hard checks stay authoritative: status, ledger rows and amounts, forbidden documents and amounts, approval gates, tickets, duplicate rows, required answer terms, whether the final answer is grounded in a retrieved snippet, and how many distinct bills the model tried to write. A blocked substitution still counts as an attempted write, even when no row lands. Any failed check forces a fail regardless of the judge. Three calibration probes run first; a judge that cannot reject a wrong amount or a skipped gate aborts the suite instead of publishing a verdict. A full run makes 12 judge calls (3 calibration, 9 cases). Judge pass is reported over scored cases only, with unavailable cases counted separately. Results land in `eval/judged_results.json` and `eval/report.md`.
-
-CI runs pytest, the deterministic eval, and `python scripts/judged_evaluate.py --skip-judge --replay` on every push. Replay re-applies the hard checks to the committed trajectories for all nine cases in `eval/judged_results.json`: no API keys, no model calls, and a stored pass that no longer passes is reported as a mismatch. The authoritative public suite remains the periodic live run, since a full pass spends real agent and judge quota on the free tiers.
-
-### Benchmarks
-
-One fresh run on 2026-11-02, 9 cases, rubric `judge-v3` (`0e5d7016`). These are raw counts, not percentages.
-
-| Benchmark | Result | What it proves |
+| Gate | Command | Latest result |
 | --- | --- | --- |
-| Deterministic state machine | 14/14; completion 0.75; efficiency 1.0; gating 1.0 | Scripted tools prove routing, gate denial, bad args, bill math, period rules, and the step ceiling without model noise |
-| Live hard checks | 9/9 | The model found the right document, amount, gate, and row count on every case, including the gated, denied, duplicate, and absent-document paths |
-| Answer grounding | 3/3 | Every `answer_evidence_terms` check found its figure or date in a retrieved snippet; the AGL billing period sits past the old 300-character clip and is now visible to the agent and the judge |
-| Attempted writes | 2 blocked duplicate proposals; 1 validated attempt each | Both duplicate writes were rejected, one distinct attempt was counted per case, and no second row landed |
-| Gate behavior | 2/2 | One over-threshold post approved and posted; one denied with no row |
-| Judge trust | calibration 3/3; 9/9 pass; 0 stricter; 0 lenient; 0 unavailable | The judge rejected the calibrated wrong amount and skipped gate, then agreed with the hard checks on all nine cases |
-| Efficiency | median 2 steps; median 1.3 s and max 3.1 s per case; 20,998 judge tokens | No runaway loop; the step ceiling bounds a stuck model |
-| Model resilience | agent `groq-120b`; judge `google-flash` | One model per role answered the whole suite; earlier runs exercised rotation under rate limits |
+| Tests | `python -m pytest -q` | 193 passed |
+| Deterministic scenarios | `python scripts/evaluate.py` | 14/14 |
+| Judged hard checks, offline replay | `python scripts/judged_evaluate.py --skip-judge --replay` | 9/9 |
+| Live agent and judge suite | `python scripts/judged_evaluate.py` | 9/9 hard, 9/9 judge, 3/3 calibration |
+
+CI runs the first three on every push. The live suite is manual because it spends real free-tier model quota. Replay re-applies the hard checks to committed trajectories with no API keys and no model calls.
+
+## Benchmarks
+
+### Deterministic suite
+
+Fourteen scenarios run through the real state machine with scripted tools and no model in the loop.
+
+| Metric | Result |
+| --- | --- |
+| Pass rate | 14/14 |
+| Completion | 0.75 |
+| Trajectory efficiency | 1.0 |
+| Gating accuracy | 1.0 |
+
+Completion is 0.75 on purpose: three of the four completion cases finish, and the fourth is a stubborn tool that the step ceiling has to stop. The suite covers routing, the step ceiling, malformed arguments, grounding, bill arithmetic, period rules, gate denial, gate approval, and ledger row counts.
+
+### Live judged suite
+
+Nine cases on 2026-11-02, rubric `judge-v3` (`0e5d7016`), agent `groq-120b` (`openai/gpt-oss-120b`), judge `google-flash` (`gemini-3.6-flash`). Raw counts, not percentages.
+
+| Metric | Result |
+| --- | --- |
+| Hard checks | 9/9 |
+| Judge pass | 9/9 scored, 0 unavailable |
+| Hard and judge agreement | 1.0, 0 stricter, 0 more lenient |
+| Judge calibration | 3/3, rejected a wrong amount and a skipped gate |
+| Blocked proposals | 2 duplicate writes, no second row landed |
+| Safety failures | 0 |
+| Gate behavior | 2/2: one approved and posted, one denied with no row |
+| Answer grounding | 3/3 required figures found in a retrieved snippet |
+| Efficiency | median 2 steps, median 1.3 s per case, max 3.1 s |
+| Judge latency | 53.1 s total, 20,998 tokens |
 
 | Case | Hard | Judge | Steps | Outcome |
 | --- | --- | --- | --- | --- |
@@ -159,19 +139,94 @@ One fresh run on 2026-11-02, 9 cases, rubric `judge-v3` (`0e5d7016`). These are 
 | `compare-no-post` | pass | pass | 2 | Named Sam and 63.70 as the lower AGL bill; no post |
 | `absent-doc` | pass | pass | 3 | Reported the missing Jemena document and made no write |
 
-Limitations: n=9 smoke suite and one run on free-tier models. Models rotate on free-tier quota, so a result reflects the system plus whichever model answered, not one fixed model. The judge remains an explanation layer, not an independent oracle: it sees the gold case and hard-check results. Answer terms read the finish reason, and grounding reads the retrieved snippets; there is no separate final-answer field. One clean run is evidence that the paths work, not a stability estimate.
+### What these numbers do not prove
 
-## Model pool
+The live suite is nine cases and one clean run on free-tier models. Models rotate when quota runs out, so a result reflects the system plus whichever model answered, not one fixed model. The judge is an explanation layer, not an independent oracle: it sees the gold case and the hard-check results. Answer terms read the finish reason, and grounding reads the retrieved snippets, because there is no separate final-answer field. One clean run is evidence that the paths work, not a stability estimate.
 
-Live calls run on a pool of free models from three providers. The ordered list per role lives in `config/models.json`; keys live only in `.env`.
+## Run it
 
-| Provider | Base URL | Key variable |
-| --- | --- | --- |
-| Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
-| llm7 | `https://api.llm7.io/v1` | `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3` |
-| Google AI Studio | `https://generativelanguage.googleapis.com/v1beta/openai/` | `GOOGLE_API_KEY` |
+```powershell
+git clone https://github.com/jordan-zuo/ledgerproof.git
+cd ledgerproof
+pip install -r requirements.txt
+python run.py
+```
 
-The first healthy model answers every call until it fails. A 429 cools that model for the provider's stated retry time (60 seconds if it gives none), a 401 disables every spec on that key, and 402, 403, or 404 disables that spec for the process. Multiple keys on one provider are separate specs with separate cooldowns, so a rejected or spent key only strands the models that name it; llm7 runs two agent specs on two keys and keeps a third key for the judge fallback. The judge pool prefers Gemini 3.6 Flash, then the 120B gpt-oss model, then Nemotron 3 Nano on its own llm7 key; Nemotron gets a 2400 token cap because it spends tokens reasoning before it answers. When every model for a role is cooled or disabled, a call waits once for up to `MODEL_POOL_MAX_WAIT` seconds (default 90) and then raises with the pool state instead of hanging. Selection is sticky, so a suite keeps one model unless it is forced to rotate. Output caps are per spec, which keeps a model with a low per-minute limit from rejecting every request.
+Before the first run, copy `.env.example` to `.env` and add at least one provider key. `run.py` loads the env file, creates the database, ingests the three committed PDFs when the inbox watcher is on, prints the access mode, and opens `http://127.0.0.1:8000/ui`.
 
-Specs whose key variable is empty are skipped. If no spec for a role has a key, the error names the variables to set. `--dry-run` prints both pools, caps, and key presence without any network call. To add a provider, add its base URL and reasoning shape to `PROVIDERS` in `agent/models.py`, add specs to `config/models.json`, and set the key variable the spec names.
+```powershell
+python run.py --check          # install report, no server and no network call
+python run.py --read-only      # every write returns 403
+python run.py --host 0.0.0.0   # bind for a host
+```
 
+`--port` sets the port and `--reload` restarts on edits. The hosted demo is open on purpose: anyone can run a task, approve a gate, or close a month. Writes are real, and the free Render instance has an ephemeral filesystem, so a restart clears the ledger and the startup ingest rebuilds the document catalog. The first visit after a pause can take 30 to 60 seconds.
+
+## Deploy without Docker
+
+The app is one Python process over SQLite, so it runs on a native Python runtime. There is no Dockerfile and no image registry. `render.yaml` is a Render blueprint; `Procfile` is the same start command for Railway, Heroku, or any host that runs Python. [Deploy the blueprint on Render](https://render.com/deploy?repo=https://github.com/jordan-zuo/ledgerproof).
+
+| Setting | Effect |
+| --- | --- |
+| `PORT` | Injected by the platform. `run.py` uses it when `--port` is absent. |
+| `APP_DB` | Database path. Defaults to `data/app.db`, which is ephemeral on a host without a disk. |
+| `APP_INBOX_WATCH` | Inbox poller. On by default; startup ingest fills the catalog. |
+| `GROQ_API_KEY`, `LLM7_API_KEY`, `LLM7_API_KEY_2`, `LLM7_API_KEY_3`, `GOOGLE_API_KEY` | Model pool keys. At least one is required for runs. |
+| `APP_TOKEN` | When set, every write needs an `X-API-Token` header. |
+| `READ_ONLY_DEMO=1` | Refuses every write with 403 while reads stay open. |
+
+For durable writes, mount a disk at `/var/data` and set `APP_DB=/var/data/app.db`. The corpus, UI, and model config ship in the repo, so the database is the only state that needs a disk. The hosted instance is connected through the Render GitHub App, so a push to `main` deploys it.
+
+## Access and abuse controls
+
+| Configuration | Write behavior |
+| --- | --- |
+| Neither set | Open. Anyone who can reach the port can change the ledger. |
+| `APP_TOKEN` set | Every write needs `X-API-Token`; reads stay open. |
+| `READ_ONLY_DEMO=1` | Every write returns 403; reads stay open. |
+| Both set | Visitors are read-only, and the owner can still write with the token. |
+
+The UI reads `GET /config` and hides Run, Approve, Reverse, Cancel, Clear, Ingest, Close, and Reopen when writes are locked. Hiding a button is cosmetic; the 401 or 403 comes from the route.
+
+The public instance also has process-local per-client limits, a global run cap, an active-run cap, a stream cap, a 32 KB request body cap, input length caps, CSV formula neutralization, and browser hardening headers. Per-client identity uses the rightmost `X-Forwarded-For` entry, which a caller can spoof, so those limits are a speed bump. The global caps are the hard bound. Limits reset when the process restarts.
+
+## The rest of the ledger
+
+**Corrections.** `POST /ledger/{id}/reverse` appends a negative row linked to the original with a reason and an approver. SQLite triggers refuse updates and deletes on ledger rows and events. A reversed posting no longer blocks a corrected re-post; a double reversal or a reversal of a reversal returns 409. `GET /reconciliation` folds the rows into one row per canonical bill with outstanding and net amounts, conflict and duplicate flags, and the full trail.
+
+**Periods and exports.** `GET /periods` lists each accounting month with its open or closed state, bills, totals per currency, and any bill still flagged. `GET /export/ledger.csv` carries the audit fields, including the period basis, canonical key, run, entry, reversal link, and approver. `GET /export/xero.csv` produces Xero bill import columns for outstanding bills. Xero needs a contact, account code, and tax type; the endpoint returns 400 and names the missing fields rather than inventing them.
+
+**Ingestion.** The inbox is `data/inbox` and the corpus is `data/corpus.json`. Drop in `.txt`, `.md`, or `.pdf` files and either `POST /ingest`, run `python scripts/ingest.py`, or let the watcher do it. `doc_id` comes from the file stem. Two files with the same id and the same text are one source; two files with the same id and different text are a collision that is reported, never silently overwritten. Canonical bill identity is computed at ingest, so two doc ids for one bill are visible in `GET /documents` before a run. Corpus writes are atomic and a lock file serializes ingest across processes.
+
+**Model pool.** Live calls run on a pool of free models from Groq, llm7, and Google AI Studio. The ordered list per role lives in `config/models.json`; keys live only in `.env`. A 429 cools one model for the provider's retry window, a 401 disables the specs on that key, and when every model for a role is unavailable the call waits once for a bounded time and then fails with the pool state. Specs with no key are skipped. `--dry-run` prints both pools without a network call.
+
+## Where it stops
+
+- The queue is one SQLite database. It covers a handful of workers on one machine or a shared volume, not a fleet. A worker stalled past its lease can be resumed while still alive; the ledger rejects the duplicate row, but the run records the resumed attempt.
+- There is one shared token at most. No accounts, sessions, or token expiry.
+- The live benchmark is nine cases and one run. It shows the paths work. It does not estimate variance.
+- Amount-due parsing takes the first payable-looking figure. A document with several conflicting due lines could be read wrong.
+- The Xero export is one supplier mapping and a bill import shape. It is not a chart of accounts, tax engine, or payment run.
+- Period assignment falls back to the posting month when neither the bill period nor the issue date can be read. The export names the basis so the choice is visible.
+
+## Repo map
+
+| Path | What is there |
+| --- | --- |
+| `agent/` | runtime, state graph, guardrails, store, dispatcher, model pool |
+| `scripts/` | API entry point, evaluators, ingest CLI |
+| `static/` | the single-page UI, no build step |
+| `tests/` | 22 test files, fixture corpus, no live database |
+| `eval/` | committed live results and the generated report |
+| `scenarios/` | deterministic eval cases |
+| `data/` | inbox, corpus JSON, and committed sample PDFs |
+| `demo/` | a snapshot ledger for inspection |
+
+The tests use temp databases and a fixture corpus. They never touch `data/app.db` or the live documents. The live judged eval reads the real corpus read-only.
+
+## Docs
+
+- [DEMO.md](DEMO.md): the two-minute walkthrough, hosted or local.
+- [CASE_STUDY.md](CASE_STUDY.md): the problem, the decisions, the limits, and what I would build next.
+- [eval/report.md](eval/report.md): the generated live judged report.
+- [config/models.json](config/models.json): the model pool, including which spec serves which role.
