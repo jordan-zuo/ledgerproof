@@ -80,6 +80,10 @@ class PeriodNotClosed(Exception):
         self.period = period
 
 
+class ActiveRunsExist(Exception):
+    """Raised when an archive/reset is attempted while runs are active."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -546,7 +550,7 @@ def find_run_by_request(request_id: str, path: Path | None = None) -> dict | Non
     conn = connect(path)
     try:
         row = conn.execute(
-            "SELECT run_id, task, status, step_count, created_at, updated_at"
+            "SELECT run_id, task, max_steps, status, step_count, created_at, updated_at"
             " FROM runs WHERE request_id = ?",
             (request_id,),
         ).fetchone()
@@ -1190,8 +1194,52 @@ def table_counts(path: Path | None = None) -> dict[str, int]:
 _ARCHIVE_LOCK = threading.Lock()
 KEEP_ARCHIVES = 5
 
+_RESET_STATEMENTS = (
+    "DROP TRIGGER IF EXISTS ledger_append_only_update",
+    "DROP TRIGGER IF EXISTS ledger_append_only_delete",
+    "DROP TRIGGER IF EXISTS events_append_only_update",
+    "DROP TRIGGER IF EXISTS events_append_only_delete",
+    "DROP TRIGGER IF EXISTS period_closures_append_only_update",
+    "DROP TRIGGER IF EXISTS period_closures_append_only_delete",
+    "DELETE FROM ledger",
+    "DELETE FROM events",
+    "DELETE FROM approvals",
+    "DELETE FROM runs",
+    "DELETE FROM period_closures",
+    """CREATE TRIGGER ledger_append_only_update
+    BEFORE UPDATE ON ledger
+    BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END""",
+    """CREATE TRIGGER ledger_append_only_delete
+    BEFORE DELETE ON ledger
+    BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END""",
+    """CREATE TRIGGER events_append_only_update
+    BEFORE UPDATE ON events
+    BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END""",
+    """CREATE TRIGGER events_append_only_delete
+    BEFORE DELETE ON events
+    BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END""",
+    """CREATE TRIGGER period_closures_append_only_update
+    BEFORE UPDATE ON period_closures
+    BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END""",
+    """CREATE TRIGGER period_closures_append_only_delete
+    BEFORE DELETE ON period_closures
+    BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END""",
+)
 
-def archive_and_clear(path: Path | None = None) -> Path:
+
+def _has_active_run(conn: sqlite3.Connection) -> bool:
+    """Idle check on the same connection that is about to delete the rows."""
+    row = conn.execute(
+        "SELECT 1 FROM runs WHERE status = 'pending'"
+        " OR status = 'awaiting_approval'"
+        " OR (status = 'running' AND claimed_by IS NOT NULL) LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
+def archive_and_clear(
+    path: Path | None = None, *, require_idle: bool = False
+) -> Path:
     """Snapshot the whole database, then start a fresh one.
 
     Rows are never deleted in place: the append-only triggers are only
@@ -1203,11 +1251,15 @@ def archive_and_clear(path: Path | None = None) -> Path:
     snapshots are retained. Concurrent resets are serialized.
     """
     with _ARCHIVE_LOCK:
-        return _archive_and_clear(path)
+        return _archive_and_clear(path, require_idle=require_idle)
 
 
-def _archive_and_clear(path: Path | None = None) -> Path:
+def _archive_and_clear(
+    path: Path | None = None, *, require_idle: bool = False
+) -> Path:
     target = path or db_path()
+    if require_idle and count_active_runs(target, live_only=True) > 0:
+        raise ActiveRunsExist("a run is still active; stop it before resetting")
     archive_dir = target.parent / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     # Microseconds keep two resets in the same second from overwriting each
@@ -1228,40 +1280,19 @@ def _archive_and_clear(path: Path | None = None) -> Path:
 
     conn = connect(target)
     try:
-        conn.executescript(
-            """
-            DROP TRIGGER IF EXISTS ledger_append_only_update;
-            DROP TRIGGER IF EXISTS ledger_append_only_delete;
-            DROP TRIGGER IF EXISTS events_append_only_update;
-            DROP TRIGGER IF EXISTS events_append_only_delete;
-            DROP TRIGGER IF EXISTS period_closures_append_only_update;
-            DROP TRIGGER IF EXISTS period_closures_append_only_delete;
-            DELETE FROM ledger;
-            DELETE FROM events;
-            DELETE FROM approvals;
-            DELETE FROM runs;
-            DELETE FROM period_closures;
-            CREATE TRIGGER ledger_append_only_update
-            BEFORE UPDATE ON ledger
-            BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
-            CREATE TRIGGER ledger_append_only_delete
-            BEFORE DELETE ON ledger
-            BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
-            CREATE TRIGGER events_append_only_update
-            BEFORE UPDATE ON events
-            BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END;
-            CREATE TRIGGER events_append_only_delete
-            BEFORE DELETE ON events
-            BEGIN SELECT RAISE(ABORT, 'run events are append-only'); END;
-            CREATE TRIGGER period_closures_append_only_update
-            BEFORE UPDATE ON period_closures
-            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
-            CREATE TRIGGER period_closures_append_only_delete
-            BEFORE DELETE ON period_closures
-            BEGIN SELECT RAISE(ABORT, 'period closures are append-only'); END;
-            """
-        )
+        # Take the write lock before checking, so no run can be queued or
+        # claimed between the check and the deletes. The check has to happen
+        # inside the transaction: an earlier statement could have started one.
+        conn.execute("BEGIN IMMEDIATE")
+        if require_idle and _has_active_run(conn):
+            raise ActiveRunsExist("a run is still active; stop it before resetting")
+        for statement in _RESET_STATEMENTS:
+            conn.execute(statement)
         conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
         conn.close()
     return archive

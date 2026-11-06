@@ -34,7 +34,13 @@ def source_evidence(source_doc: str, evidence: list[Evidence]) -> list[Evidence]
 def is_quoted(amount: float, evidence: list[Evidence]) -> bool:
     forms = {f"{float(amount):.2f}", f"{float(amount):,.2f}"}
     text = "\n".join(item.text for item in evidence)
-    return any(form in text for form in forms)
+    # Require the complete numeric token. A substring check would accept
+    # 13.00 when the document only contains 113.00 (or 13,000.00).
+    # Trailing punctuation like sentence-ending periods or commas must still match.
+    return any(
+        re.search(rf"(?<![\d,]){re.escape(form)}(?!\d)", text)
+        for form in forms
+    )
 
 
 def is_source_seen(source_doc: str, evidence: list[Evidence]) -> bool:

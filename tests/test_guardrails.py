@@ -140,3 +140,30 @@ def test_unnamed_task_needs_one_candidate_document() -> None:
 def test_threshold_boundary() -> None:
     assert assess_ledger(_args(10_000.0)).needs_approval is False
     assert assess_ledger(_args(10_000.01)).needs_approval is True
+
+
+def test_is_quoted_matches_amounts_with_trailing_punctuation() -> None:
+    from agent.guardrails import is_quoted
+
+    evidence = [
+        Evidence(doc_id="doc-1", text="The total amount due is $114.87."),
+        Evidence(doc_id="doc-2", text="Payment of $79.87, due on 27 April."),
+        Evidence(doc_id="doc-3", text="Discount applied: ($13.00) total."),
+    ]
+    assert is_quoted(114.87, evidence[:1])
+    assert is_quoted(79.87, evidence[1:2])
+    assert is_quoted(13.00, evidence[2:3])
+
+
+def test_is_quoted_rejects_subnumbers_and_extended_decimals() -> None:
+    from agent.guardrails import is_quoted
+
+    assert not is_quoted(
+        13.00, [Evidence(doc_id="doc", text="Total amount is $113.00.")]
+    )
+    assert not is_quoted(
+        13.00, [Evidence(doc_id="doc", text="Total amount is $1,013.00.")]
+    )
+    assert not is_quoted(
+        13.00, [Evidence(doc_id="doc", text="Total is 13.005.")]
+    )

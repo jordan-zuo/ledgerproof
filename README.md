@@ -2,7 +2,7 @@
 
 Hand-rolled state graph for tool-using workflows. Typed Pydantic state, pure routing function, hard step ceiling, fail-loud tool errors, and a human approval gate for sensitive operations. No agent framework dependency.
 
-Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, a free-model pool with rotation, and a one-command launcher that runs on a native Python host without Docker. 187 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
+Status: working demo. Live run streaming, run list with reload reattach and cancel, a database-backed run queue with leases and restart recovery, request-id idempotency, evidence-backed ledger writes, human approvals, canonical bill identity, signed reversal entries, a bill reconciliation view, accounting-period close with append-only close/reopen actions, generic and Xero bill CSV exports, an archive-first ledger reset, token-gated writes with a read-only demo mode, inbox ingestion with identity and duplicate detection, a free-model pool with rotation, and a one-command launcher that runs on a native Python host without Docker. 193 tests, deterministic eval 14/14, and CI replaying the judged hard checks on every push.
 
 ## Run
 

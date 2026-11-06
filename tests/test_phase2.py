@@ -109,6 +109,20 @@ def test_request_id_replay_returns_the_same_run(isolated_db, monkeypatch) -> Non
         assert first.json()["run_id"] == second.json()["run_id"]
         assert len(client.get("/runs").json()["runs"]) == 1
 
+        # Reusing the request_id with different task returns 409 Conflict
+        diff_task = client.post(
+            "/run", json={"task": "different", "max_steps": 3, "request_id": "req-1"}
+        )
+        assert diff_task.status_code == 409
+        assert "request_id was already used" in diff_task.json()["detail"]
+
+        # Reusing the request_id with different max_steps returns 409 Conflict
+        diff_steps = client.post(
+            "/run", json={"task": "t", "max_steps": 5, "request_id": "req-1"}
+        )
+        assert diff_steps.status_code == 409
+        assert "request_id was already used" in diff_steps.json()["detail"]
+
 
 def test_cancel_running_run_discards_the_inflight_decision(
     isolated_db, monkeypatch
@@ -202,6 +216,42 @@ def test_cancel_at_a_gate_denies_the_ticket(isolated_db, monkeypatch) -> None:
         assert any(event["kind"] == "denied" for event in events)
 
 
+def test_cancel_reports_a_ticket_the_worker_already_denied(
+    isolated_db, monkeypatch
+) -> None:
+    """The worker denies pending tickets as it exits. If it wins the race,
+    the click must still name the ticket it closed instead of an empty list."""
+    monkeypatch.setattr(
+        api,
+        "TEST_CLIENT",
+        _ScriptedClient(
+            [{"action": "request_approval", "args": {}, "reason": "need a human"}]
+        ),
+    )
+    original_cancel = store.cancel_run
+
+    def cancel_then_let_the_worker_deny(run_id: str) -> bool:
+        cancelled = original_cancel(run_id)
+        api._deny_pending_tickets(run_id)
+        return cancelled
+
+    monkeypatch.setattr(api.store, "cancel_run", cancel_then_let_the_worker_deny)
+
+    with TestClient(api.app) as client:
+        run_id = client.post(
+            "/run", json={"task": "t", "max_steps": 3}
+        ).json()["run_id"]
+        assert wait_for_run(client, run_id)["run"]["status"] == "awaiting_approval"
+        ticket = client.get("/approvals").json()["pending"][0]
+
+        cancelled = client.post(f"/runs/{run_id}/cancel")
+
+        assert cancelled.status_code == 200
+        assert cancelled.json()["tickets_denied"] == [ticket["ticket_id"]]
+        denied = [e for e in store.get_events(run_id) if e["kind"] == "denied"]
+        assert len(denied) == 1
+
+
 def test_second_decision_on_a_ledger_ticket_is_refused(isolated_db) -> None:
     """Two tabs approve the same gate: one posts, the other gets 409."""
     run_id = store.create_run("post the Origin standing bill")
@@ -263,3 +313,23 @@ def test_decide_refuses_a_cancelled_run(isolated_db) -> None:
 
     assert res.status_code == 409
     assert "cancelled" in res.json()["detail"]
+
+
+def test_decide_refuses_terminal_runs(isolated_db) -> None:
+    client = TestClient(api.app)
+
+    # Failed run
+    failed_id = store.create_run("f")
+    store.set_run_status(failed_id, "failed", 1)
+    store.submit_approval("t-failed", failed_id, "request_approval", "x", {})
+    res_f = client.post("/approvals/t-failed/decide", json={"approved": True})
+    assert res_f.status_code == 409
+    assert "failed" in res_f.json()["detail"]
+
+    # Done run
+    done_id = store.create_run("d")
+    store.set_run_status(done_id, "done", 1)
+    store.submit_approval("t-done", done_id, "request_approval", "x", {})
+    res_d = client.post("/approvals/t-done/decide", json={"approved": True})
+    assert res_d.status_code == 409
+    assert "done" in res_d.json()["detail"]

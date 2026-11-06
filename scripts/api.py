@@ -154,7 +154,31 @@ class _GuardMiddleware:
             await response(scope, receive, sender)
             return
 
-        await self.app(scope, receive, sender)
+        received = 0
+
+        async def guarded_receive() -> dict[str, Any]:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, guarded_receive, sender)
+        except _RequestBodyTooLarge:
+            response = Response(
+                content='{"detail":"request body too large"}',
+                status_code=413,
+                media_type="application/json",
+            )
+            await response(scope, receive, sender)
+
+
+class _RequestBodyTooLarge(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="request body too large")
 
 
 app = FastAPI(title="Ledgerproof", lifespan=lifespan)
@@ -770,7 +794,10 @@ def reset(req: ResetRequest, request: Request) -> dict[str, Any]:
                 status_code=409,
                 detail="a run is still active; stop it before resetting",
             )
-        archived = store.archive_and_clear()
+        try:
+            archived = store.archive_and_clear(require_idle=True)
+        except store.ActiveRunsExist as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
     return {
         "archived": str(archived),
         "tables": store.table_counts(),
@@ -805,6 +832,14 @@ def create_run(req: RunRequest, request: Request) -> dict[str, Any]:
     if req.request_id:
         existing = store.find_run_by_request(req.request_id)
         if existing is not None:
+            if (
+                existing["task"] != req.task
+                or int(existing["max_steps"]) != int(req.max_steps)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="request_id was already used for a different request",
+                )
             WORKER.wake()
             return _run_receipt(existing, True)
     with _WRITE_LOCK:
@@ -827,6 +862,14 @@ def create_run(req: RunRequest, request: Request) -> dict[str, Any]:
             )
             if existing is None:
                 raise
+            if (
+                existing["task"] != req.task
+                or int(existing["max_steps"]) != int(req.max_steps)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="request_id was already used for a different request",
+                ) from None
             return _run_receipt(existing, True)
     WORKER.wake()
     return _run_receipt({"run_id": run_id, "status": "running"}, False)
@@ -859,6 +902,10 @@ def cancel_run(run_id: str) -> dict[str, Any]:
             status_code=409, detail=f"run already {run['status']}"
         )
     was_awaiting = run["status"] == "awaiting_approval"
+    # The worker may deny these tickets itself while it exits. Record what
+    # was open at the click so the response still names every ticket the
+    # cancel closed, whichever thread got there first.
+    pending_before = store.pending_approvals_for_run(run_id)
     handle = _CANCELS.get(run_id)
     if handle is not None:
         handle.set()
@@ -868,6 +915,16 @@ def cancel_run(run_id: str) -> dict[str, Any]:
             status_code=409, detail=f"run already {current['status']}"
         )
     denied = _deny_pending_tickets(run_id)
+    for ticket in pending_before:
+        if ticket["ticket_id"] in denied:
+            continue
+        settled = store.get_approval(ticket["ticket_id"]) or {}
+        if (
+            settled.get("decided")
+            and not settled.get("approved")
+            and settled.get("note") == "cancelled by user"
+        ):
+            denied.append(ticket["ticket_id"])
     ticket_note = " (cancelled by user)" if was_awaiting else ""
     store.append_event(
         run_id,
@@ -980,8 +1037,10 @@ def decide(ticket_id: str, req: DecideRequest) -> dict[str, Any]:
 
     run_id = ticket["run_id"]
     run = store.get_run(run_id) or {}
-    if run.get("status") == "cancelled":
-        raise HTTPException(status_code=409, detail="run was cancelled")
+    if run.get("status") in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409, detail=f"run was {run.get('status')}"
+        )
 
     if not req.approved:
         ticket = _gate(ticket_id, False, req.decided_by, req.note)

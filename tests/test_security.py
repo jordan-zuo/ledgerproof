@@ -105,6 +105,30 @@ def test_oversized_request_bodies_are_refused(isolated_db) -> None:
     assert res.status_code == 413
 
 
+def test_oversized_chunked_request_bodies_are_refused(isolated_db) -> None:
+    chunks = (b"x" * 1024 for _ in range(33))
+    res = TestClient(api.app).post(
+        "/run", content=chunks, headers={"Content-Type": "application/json"}
+    )
+    assert res.status_code == 413
+    assert res.json() == {"detail": "request body too large"}
+
+
+def test_archive_and_clear_require_idle_blocks_active_runs(
+    isolated_db, monkeypatch
+) -> None:
+    run_id = store.create_run("active-task", status="pending")
+    with pytest.raises(store.ActiveRunsExist):
+        store.archive_and_clear(require_idle=True)
+
+    # Simulate a run queued after the cheap pre-check. The check inside the
+    # reset transaction must still refuse and leave the row in place.
+    monkeypatch.setattr(store, "count_active_runs", lambda *args, **kw: 0)
+    with pytest.raises(store.ActiveRunsExist):
+        store.archive_and_clear(require_idle=True)
+    assert store.get_run(run_id) is not None
+
+
 def test_responses_set_browser_hardening_headers(isolated_db) -> None:
     res = TestClient(api.app).get("/health")
     assert res.headers["x-frame-options"] == "DENY"
