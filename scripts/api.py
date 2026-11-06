@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,20 @@ from agent.ingest import (  # noqa: E402
     ingest_once,
     watcher_enabled,
 )
+from agent.limits import (  # noqa: E402
+    GLOBAL_RUNS_PER_WINDOW,
+    INGESTS_PER_WINDOW,
+    INGEST_WINDOW_SECONDS,
+    MAX_ACTIVE_RUNS,
+    MAX_EVENT_STREAMS,
+    RESETS_PER_WINDOW,
+    RESET_WINDOW_SECONDS,
+    RUNS_PER_WINDOW,
+    RUN_WINDOW_SECONDS,
+    ActiveCounter,
+    RateLimiter,
+    client_key,
+)
 from agent.periods import period_compatible  # noqa: E402
 from agent.reconciliation import reconcile, summarize  # noqa: E402
 from agent.runner import run_with_model  # noqa: E402
@@ -85,21 +100,97 @@ async def lifespan(_: FastAPI) -> Any:
         WORKER.stop()
 
 
+MAX_REQUEST_BYTES = 32_768
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    (
+        "Content-Security-Policy",
+        "frame-ancestors 'none'; base-uri 'self'; object-src 'none';"
+        " form-action 'self'",
+    ),
+)
+
+
+class _GuardMiddleware:
+    """Reject oversized bodies and add browser hardening headers.
+
+    Pure ASGI rather than ``BaseHTTPMiddleware``: wrapping the response body
+    in another task can hide client disconnects from the event stream, and a
+    dead stream would hold a slot until its run finished.
+    """
+
+    def __init__(self, app: Any, max_bytes: int = MAX_REQUEST_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def sender(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                present = {key.lower() for key, _ in message.get("headers", [])}
+                for key, value in _SECURITY_HEADERS:
+                    if key.lower().encode() not in present:
+                        message.setdefault("headers", []).append(
+                            (key.lower().encode(), value.encode())
+                        )
+            await send(message)
+
+        length = b""
+        for key, value in scope.get("headers", []):
+            if key.lower() == b"content-length":
+                length = value
+                break
+        if length.isdigit() and int(length) > self.max_bytes:
+            response = Response(
+                content='{"detail":"request body too large"}',
+                status_code=413,
+                media_type="application/json",
+            )
+            await response(scope, receive, sender)
+            return
+
+        await self.app(scope, receive, sender)
+
+
 app = FastAPI(title="Ledgerproof", lifespan=lifespan)
+app.add_middleware(_GuardMiddleware)
 
 TEST_CLIENT: Any = None
 
+# The demo is public, so every write path gets a throttle or a hard cap.
+_RUN_LIMITER = RateLimiter(RUNS_PER_WINDOW, RUN_WINDOW_SECONDS)
+_GLOBAL_RUN_LIMITER = RateLimiter(GLOBAL_RUNS_PER_WINDOW, RUN_WINDOW_SECONDS)
+_RESET_LIMITER = RateLimiter(RESETS_PER_WINDOW, RESET_WINDOW_SECONDS)
+_INGEST_LIMITER = RateLimiter(INGESTS_PER_WINDOW, INGEST_WINDOW_SECONDS)
+_STREAM_SLOTS = ActiveCounter(MAX_EVENT_STREAMS)
+# Serializes run creation against reset so a run cannot slip into a cleared DB.
+_WRITE_LOCK = threading.Lock()
+
+
+def _rate_limited(limiter: RateLimiter, request: Request, action: str) -> None:
+    if limiter.allow(client_key(request)):
+        return
+    raise HTTPException(
+        status_code=429,
+        detail=f"too many {action} from this client; wait a few minutes",
+    )
+
 
 class RunRequest(BaseModel):
-    task: str = Field(min_length=1)
+    task: str = Field(min_length=1, max_length=2000)
     max_steps: int = Field(default=6, ge=1, le=20)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class DecideRequest(BaseModel):
     approved: bool
-    decided_by: str = Field(default="web-ui", min_length=1)
-    note: str = ""
+    decided_by: str = Field(default="web-ui", min_length=1, max_length=120)
+    note: str = Field(default="", max_length=500)
 
 
 class ResetRequest(BaseModel):
@@ -377,8 +468,9 @@ def document_file(doc_id: str) -> FileResponse:
 
 
 @app.post("/ingest", dependencies=[Depends(require_write)])
-def ingest() -> dict[str, Any]:
+def ingest(request: Request) -> dict[str, Any]:
     """Scan the inbox now. The watcher does the same on file changes."""
+    _rate_limited(_INGEST_LIMITER, request, "ingest requests")
     try:
         return ingest_once()
     except Exception as exc:
@@ -486,13 +578,38 @@ def reopen_month(period: str, req: CloseRequest) -> dict[str, Any]:
     return {"period": period, "status": "open", "closure": action}
 
 
+_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Neutralize spreadsheet formulas without touching real numbers.
+
+    A cell such as ``=HYPERLINK(...)`` runs when the export is opened in
+    Excel. An apostrophe keeps it literal. Numeric strings like ``-42.00``
+    are left alone so amounts stay numeric.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text.startswith(_FORMULA_LEADS):
+        try:
+            float(text)
+        except ValueError:
+            return "'" + text
+    return text
+
+
 def _csv_response(columns: tuple[str, ...], rows: list[dict], name: str) -> Response:
     buffer = io.StringIO()
     writer = csv.DictWriter(
         buffer, fieldnames=list(columns), extrasaction="ignore", lineterminator="\n"
     )
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(
+        {key: _csv_cell(value) for key, value in row.items()} for row in rows
+    )
     return Response(
         content=buffer.getvalue(),
         media_type="text/csv",
@@ -527,9 +644,9 @@ def export_ledger_csv(
 @app.get("/export/xero.csv")
 def export_xero_csv(
     period: str | None = Query(default=None),
-    contact: str | None = Query(default=None),
-    account_code: str | None = Query(default=None),
-    tax_type: str | None = Query(default=None),
+    contact: str | None = Query(default=None, max_length=200),
+    account_code: str | None = Query(default=None, max_length=40),
+    tax_type: str | None = Query(default=None, max_length=40),
     due_days: int | None = Query(default=None, ge=0, le=365),
 ) -> Response:
     """Xero bill import shape from outstanding bills.
@@ -626,23 +743,34 @@ def storage() -> dict[str, Any]:
     path = store.init_db()
     counts = store.table_counts()
     return {
-        "path": str(path),
+        # The name identifies the database without publishing the host's
+        # directory layout to every visitor.
+        "database": path.name,
         "size_bytes": path.stat().st_size,
         "tables": counts,
     }
 
 
 @app.post("/admin/reset", dependencies=[Depends(require_write)])
-def reset(req: ResetRequest) -> dict[str, Any]:
+def reset(req: ResetRequest, request: Request) -> dict[str, Any]:
     """Archive the current database and start empty.
 
     Destructive by intent, so it needs an explicit ``confirm`` and it never
-    deletes rows without first writing a copy you can open.
+    deletes rows without first writing a copy you can open. It refuses to
+    run while work is live, because clearing the database under a worker
+    would orphan the run that is still writing.
     """
+    _rate_limited(_RESET_LIMITER, request, "ledger resets")
     if not req.confirm:
         raise HTTPException(status_code=400, detail="reset requires confirm=true")
     store.init_db()
-    archived = store.archive_and_clear()
+    with _WRITE_LOCK:
+        if store.count_active_runs(live_only=True):
+            raise HTTPException(
+                status_code=409,
+                detail="a run is still active; stop it before resetting",
+            )
+        archived = store.archive_and_clear()
     return {
         "archived": str(archived),
         "tables": store.table_counts(),
@@ -666,28 +794,40 @@ def _run_receipt(run: dict[str, Any], replayed: bool) -> dict[str, Any]:
 
 
 @app.post("/run", status_code=202, dependencies=[Depends(require_write)])
-def create_run(req: RunRequest) -> dict[str, Any]:
+def create_run(req: RunRequest, request: Request) -> dict[str, Any]:
+    _rate_limited(_RUN_LIMITER, request, "runs")
+    if not _GLOBAL_RUN_LIMITER.allow("all"):
+        raise HTTPException(
+            status_code=429,
+            detail="the demo is handling a lot of runs; try again shortly",
+        )
     store.init_db()
     if req.request_id:
         existing = store.find_run_by_request(req.request_id)
         if existing is not None:
             WORKER.wake()
             return _run_receipt(existing, True)
-    try:
-        run_id = store.create_run(
-            req.task,
-            request_id=req.request_id,
-            max_steps=req.max_steps,
-            status="pending",
-        )
-    except sqlite3.IntegrityError:
-        # Lost a race with a concurrent submit carrying the same request id.
-        existing = (
-            store.find_run_by_request(req.request_id) if req.request_id else None
-        )
-        if existing is None:
-            raise
-        return _run_receipt(existing, True)
+    with _WRITE_LOCK:
+        if store.count_active_runs() >= MAX_ACTIVE_RUNS:
+            raise HTTPException(
+                status_code=429,
+                detail="the demo queue is full; try again shortly",
+            )
+        try:
+            run_id = store.create_run(
+                req.task,
+                request_id=req.request_id,
+                max_steps=req.max_steps,
+                status="pending",
+            )
+        except sqlite3.IntegrityError:
+            # Lost a race with a concurrent submit carrying the same request id.
+            existing = (
+                store.find_run_by_request(req.request_id) if req.request_id else None
+            )
+            if existing is None:
+                raise
+            return _run_receipt(existing, True)
     WORKER.wake()
     return _run_receipt({"run_id": run_id, "status": "running"}, False)
 
@@ -750,6 +890,11 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
     run = store.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run")
+    if not _STREAM_SLOTS.acquire():
+        raise HTTPException(
+            status_code=429,
+            detail="too many open run streams; close another tab and retry",
+        )
 
     cursor = request.headers.get("last-event-id") or request.query_params.get("after")
     try:
@@ -794,8 +939,15 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
                     yield ": keep-alive\n\n"
             await anyio.sleep(0.2)
 
+    async def _guarded() -> Any:
+        try:
+            async for chunk in _gen():
+                yield chunk
+        finally:
+            _STREAM_SLOTS.release()
+
     return StreamingResponse(
-        _gen(),
+        _guarded(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

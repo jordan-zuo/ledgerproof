@@ -2158,7 +2158,7 @@
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || res.status);
-        notify(`Ledger cleared. The previous database was archived to ${data.archived}`, 'bad');
+        notify('Ledger cleared. The previous database was archived.', 'bad');
         if (sseSource) {
           sseSource.close();
           sseSource = null;
@@ -2369,7 +2369,7 @@
       } catch (e) {
         if (table) table.style.display = '';
         if (empty) empty.style.display = 'none';
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--accent-rust);">Failed to load ledger: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--accent-rust);">Failed to load ledger: ${escapeHtml(e.message)}</td></tr>`;
       }
     }
 

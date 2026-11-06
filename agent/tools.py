@@ -46,7 +46,7 @@ def _terms(text: str) -> set[str]:
 
 
 class RetrievalArgs(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, max_length=500)
     top_k: int = Field(default=4, ge=1, le=20)
 
     @field_validator("query")
@@ -59,10 +59,10 @@ class RetrievalArgs(BaseModel):
 
 
 class LedgerArgs(BaseModel):
-    entry_id: str = Field(min_length=1)
+    entry_id: str = Field(min_length=1, max_length=120)
     amount: float = Field(gt=0)
-    currency: str = Field(default="AUD", min_length=1)
-    source_doc: str = Field(min_length=1)
+    currency: str = Field(default="AUD", min_length=1, max_length=12)
+    source_doc: str = Field(min_length=1, max_length=200)
     # Derived from the cited bill, never from the model. Excluded from dumps
     # so a proposal cannot smuggle its own identity past the guard.
     bill_key: str | None = Field(default=None, exclude=True)

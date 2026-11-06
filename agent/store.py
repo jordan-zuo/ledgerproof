@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -550,6 +551,29 @@ def find_run_by_request(request_id: str, path: Path | None = None) -> dict | Non
             (request_id,),
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def count_active_runs(path: Path | None = None, *, live_only: bool = False) -> int:
+    """Count work that is queued or executing.
+
+    ``live_only`` ignores rows with no claim. Those cannot be executing
+    anywhere, so a seeded test row or a legacy row must not block
+    maintenance such as a reset.
+    """
+    where = "status IN ('pending', 'running', 'awaiting_approval')"
+    if live_only:
+        where = (
+            "status = 'pending' OR status = 'awaiting_approval'"
+            " OR (status = 'running' AND claimed_by IS NOT NULL)"
+        )
+    conn = connect(path)
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM runs WHERE {where}"
+        ).fetchone()
+        return int(row["n"])
     finally:
         conn.close()
 
@@ -1163,6 +1187,10 @@ def table_counts(path: Path | None = None) -> dict[str, int]:
         conn.close()
 
 
+_ARCHIVE_LOCK = threading.Lock()
+KEEP_ARCHIVES = 5
+
+
 def archive_and_clear(path: Path | None = None) -> Path:
     """Snapshot the whole database, then start a fresh one.
 
@@ -1170,11 +1198,21 @@ def archive_and_clear(path: Path | None = None) -> Path:
     dropped inside this one maintenance transaction, after the archive is
     written. The old ledger survives as a file you can open and compare.
     Document metadata describes the corpus, not the ledger, so it is kept.
+
+    A public reset button can otherwise fill the disk, so only the newest
+    snapshots are retained. Concurrent resets are serialized.
     """
+    with _ARCHIVE_LOCK:
+        return _archive_and_clear(path)
+
+
+def _archive_and_clear(path: Path | None = None) -> Path:
     target = path or db_path()
     archive_dir = target.parent / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microseconds keep two resets in the same second from overwriting each
+    # other's snapshot.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     archive = archive_dir / f"{target.stem}-{stamp}.db"
     src = connect(target)
     dst = sqlite3.connect(str(archive))
@@ -1183,6 +1221,10 @@ def archive_and_clear(path: Path | None = None) -> Path:
     finally:
         dst.close()
         src.close()
+
+    snapshots = sorted(archive_dir.glob(f"{target.stem}-*.db"))
+    for old in snapshots[:-KEEP_ARCHIVES]:
+        old.unlink(missing_ok=True)
 
     conn = connect(target)
     try:
