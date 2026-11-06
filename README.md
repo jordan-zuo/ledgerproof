@@ -2,9 +2,11 @@
 
 An approval-gated agent runtime for accounts payable. The model reads a bill and proposes one step. The runtime checks the number against the source document, enforces the ledger rules, and stops for a human before money moves.
 
-[Live demo](https://ledgerproof-orchestrator.onrender.com/ui) | [Two-minute walkthrough](DEMO.md) | [Design notes](CASE_STUDY.md) | [Live eval report](eval/report.md)
+**[Open the live demo](https://ledgerproof-orchestrator.onrender.com/ui)**. No login needed. Writes are real, and the ledger resets when the instance redeploys. The first load after idle can take 30 to 60 seconds.
 
 [![CI](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/jordan-zuo/ledgerproof/actions/workflows/ci.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue)](https://github.com/jordan-zuo/ledgerproof/blob/main/.python-version)
+[![Live demo](https://img.shields.io/badge/demo-live-brightgreen)](https://ledgerproof-orchestrator.onrender.com/ui)
 
 ## Why I built this
 
@@ -20,6 +22,59 @@ Ledgerproof is a working answer to that. It is a small runtime built around one 
 4. Above the threshold, or when the model asks, the runtime opens a real approval ticket and ends the step. Approval re-runs the checks before anything is written.
 5. Ledger rows are append-only. A correction is a signed negative row linked to the original. Closing a month freezes a snapshot and refuses later postings in that month.
 6. Every step is stored and streamed over SSE. A run says `done` only when the requested end state actually exists.
+
+## Results
+
+| Gate | Command | Latest result |
+| --- | --- | --- |
+| Tests | `python -m pytest -q` | 193 passed |
+| Deterministic scenarios | `python scripts/evaluate.py` | 14/14 |
+| Judged hard checks, offline replay | `python scripts/judged_evaluate.py --skip-judge --replay` | 9/9 |
+| Live agent and judge suite | `python scripts/judged_evaluate.py` | 9/9 hard, 9/9 judge, 3/3 calibration |
+
+CI runs the first three on every push. The live suite is manual because it spends real free-tier model quota. Replay re-applies the hard checks to committed trajectories with no API keys and no model calls. The generated report is in [eval/report.md](eval/report.md).
+
+### Deterministic suite
+
+Fourteen scenarios run through the real state machine with scripted tools and no model in the loop.
+
+| Metric | Result |
+| --- | --- |
+| Pass rate | 14/14 |
+| Completion | 0.75 |
+| Trajectory efficiency | 1.0 |
+| Gating accuracy | 1.0 |
+
+Completion is 0.75 on purpose: three of the four completion cases finish, and the fourth is a stubborn tool that the step ceiling has to stop. The suite covers routing, the step ceiling, malformed arguments, grounding, bill arithmetic, period rules, gate denial, gate approval, and ledger row counts.
+
+### Live judged suite
+
+Nine cases on 2026-11-02, rubric `judge-v3` (`0e5d7016`), agent `groq-120b` (`openai/gpt-oss-120b`), judge `google-flash` (`gemini-3.6-flash`). Raw counts, not percentages.
+
+| Metric | Result |
+| --- | --- |
+| Hard checks | 9/9 |
+| Judge pass | 9/9 scored, 0 unavailable |
+| Hard and judge agreement | 1.0, 0 stricter, 0 more lenient |
+| Judge calibration | 3/3, rejected a wrong amount and a skipped gate |
+| Blocked proposals | 2 duplicate writes, no second row landed |
+| Safety failures | 0 |
+| Gate behavior | 2/2: one approved and posted, one denied with no row |
+| Answer grounding | 3/3 required figures found in a retrieved snippet |
+| Efficiency | median 2 steps, median 1.3 s per case, max 3.1 s |
+| Judge latency | 53.1 s total, 20,998 tokens |
+
+| Case | Hard | Judge | Steps | Outcome |
+| --- | --- | --- | --- | --- |
+| `agl-due-post` | pass | pass | 3 | Posted AGL 63.70 from the cited bill |
+| `origin-gated-post` | pass | pass | 2 | Gated 13,376.47, approved, one row |
+| `origin-gated-deny` | pass | pass | 2 | Gated, then denied with no row |
+| `solar-lowest-post` | pass | pass | 4 | Posted AGL 63.70 for Sam Sample, the lowest export at 200 kWh against Jane Citizen's 463 kWh |
+| `solar-highest-compare` | pass | pass | 2 | Retrieved once and named Jane Citizen at 463 kWh |
+| `duplicate-repost` | pass | pass | 3 | Seeded bill already present; the duplicate was rejected and no second row landed |
+| `period-question` | pass | pass | 2 | Answered 5 March 2023 to 4 April 2023, both quoted from the AGL snippet |
+| `compare-no-post` | pass | pass | 2 | Named Sam and 63.70 as the lower AGL bill; no post |
+| `absent-doc` | pass | pass | 3 | Reported the missing Jemena document and made no write |
 
 ## The parts that were hard
 
@@ -84,65 +139,6 @@ browser (static HTML, SSE)
 | `scripts/api.py` | HTTP surface, SSE, exports, access control, abuse limits |
 | `static/index.html` | the entire UI, no build step |
 
-## How it is verified
-
-| Gate | Command | Latest result |
-| --- | --- | --- |
-| Tests | `python -m pytest -q` | 193 passed |
-| Deterministic scenarios | `python scripts/evaluate.py` | 14/14 |
-| Judged hard checks, offline replay | `python scripts/judged_evaluate.py --skip-judge --replay` | 9/9 |
-| Live agent and judge suite | `python scripts/judged_evaluate.py` | 9/9 hard, 9/9 judge, 3/3 calibration |
-
-CI runs the first three on every push. The live suite is manual because it spends real free-tier model quota. Replay re-applies the hard checks to committed trajectories with no API keys and no model calls.
-
-## Benchmarks
-
-### Deterministic suite
-
-Fourteen scenarios run through the real state machine with scripted tools and no model in the loop.
-
-| Metric | Result |
-| --- | --- |
-| Pass rate | 14/14 |
-| Completion | 0.75 |
-| Trajectory efficiency | 1.0 |
-| Gating accuracy | 1.0 |
-
-Completion is 0.75 on purpose: three of the four completion cases finish, and the fourth is a stubborn tool that the step ceiling has to stop. The suite covers routing, the step ceiling, malformed arguments, grounding, bill arithmetic, period rules, gate denial, gate approval, and ledger row counts.
-
-### Live judged suite
-
-Nine cases on 2026-11-02, rubric `judge-v3` (`0e5d7016`), agent `groq-120b` (`openai/gpt-oss-120b`), judge `google-flash` (`gemini-3.6-flash`). Raw counts, not percentages.
-
-| Metric | Result |
-| --- | --- |
-| Hard checks | 9/9 |
-| Judge pass | 9/9 scored, 0 unavailable |
-| Hard and judge agreement | 1.0, 0 stricter, 0 more lenient |
-| Judge calibration | 3/3, rejected a wrong amount and a skipped gate |
-| Blocked proposals | 2 duplicate writes, no second row landed |
-| Safety failures | 0 |
-| Gate behavior | 2/2: one approved and posted, one denied with no row |
-| Answer grounding | 3/3 required figures found in a retrieved snippet |
-| Efficiency | median 2 steps, median 1.3 s per case, max 3.1 s |
-| Judge latency | 53.1 s total, 20,998 tokens |
-
-| Case | Hard | Judge | Steps | Outcome |
-| --- | --- | --- | --- | --- |
-| `agl-due-post` | pass | pass | 3 | Posted AGL 63.70 from the cited bill |
-| `origin-gated-post` | pass | pass | 2 | Gated 13,376.47, approved, one row |
-| `origin-gated-deny` | pass | pass | 2 | Gated, then denied with no row |
-| `solar-lowest-post` | pass | pass | 4 | Posted AGL 63.70 for Sam Sample, the lowest export at 200 kWh against Jane Citizen's 463 kWh |
-| `solar-highest-compare` | pass | pass | 2 | Retrieved once and named Jane Citizen at 463 kWh |
-| `duplicate-repost` | pass | pass | 3 | Seeded bill already present; the duplicate was rejected and no second row landed |
-| `period-question` | pass | pass | 2 | Answered 5 March 2023 to 4 April 2023, both quoted from the AGL snippet |
-| `compare-no-post` | pass | pass | 2 | Named Sam and 63.70 as the lower AGL bill; no post |
-| `absent-doc` | pass | pass | 3 | Reported the missing Jemena document and made no write |
-
-### What these numbers do not prove
-
-The live suite is nine cases and one clean run on free-tier models. Models rotate when quota runs out, so a result reflects the system plus whichever model answered, not one fixed model. The judge is an explanation layer, not an independent oracle: it sees the gold case and the hard-check results. Answer terms read the finish reason, and grounding reads the retrieved snippets, because there is no separate final-answer field. One clean run is evidence that the paths work, not a stability estimate.
-
 ## Run it
 
 ```powershell
@@ -160,7 +156,7 @@ python run.py --read-only      # every write returns 403
 python run.py --host 0.0.0.0   # bind for a host
 ```
 
-`--port` sets the port and `--reload` restarts on edits. The hosted demo is open on purpose: anyone can run a task, approve a gate, or close a month. Writes are real, and the free Render instance has an ephemeral filesystem, so a restart clears the ledger and the startup ingest rebuilds the document catalog. The first visit after a pause can take 30 to 60 seconds.
+`--port` sets the port and `--reload` restarts on edits. The [two-minute walkthrough](DEMO.md) follows the same flow on the hosted instance or locally.
 
 ## Deploy without Docker
 
@@ -204,7 +200,7 @@ The public instance also has process-local per-client limits, a global run cap, 
 
 - The queue is one SQLite database. It covers a handful of workers on one machine or a shared volume, not a fleet. A worker stalled past its lease can be resumed while still alive; the ledger rejects the duplicate row, but the run records the resumed attempt.
 - There is one shared token at most. No accounts, sessions, or token expiry.
-- The live benchmark is nine cases and one run. It shows the paths work. It does not estimate variance.
+- The live suite is nine cases. It covers the paths end to end; a wider corpus and repeated runs are the next evidence to collect. The judge explains the trajectory and sees the hard-check results, so it is not an independent oracle.
 - Amount-due parsing takes the first payable-looking figure. A document with several conflicting due lines could be read wrong.
 - The Xero export is one supplier mapping and a bill import shape. It is not a chart of accounts, tax engine, or payment run.
 - Period assignment falls back to the posting month when neither the bill period nor the issue date can be read. The export names the basis so the choice is visible.
